@@ -1,6 +1,6 @@
 import Foundation
 
-enum ClaudeActivity {
+enum ClaudeActivity: Hashable {
     case thinking       // Claudeが考え中 (最後のメッセージがuser)
     case toolRunning    // ツール実行中 (最後がtool_use)
     case responding     // テキスト応答中 (最後がassistant text)

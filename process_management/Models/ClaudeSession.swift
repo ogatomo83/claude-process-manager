@@ -39,6 +39,7 @@ struct ClaudeSession: Identifiable {
     let elapsedTime: String
     let status: SessionStatus
     let jsonlPath: String?
+    let activity: ClaudeActivity
 
     var pid: Int32 { id }
 }

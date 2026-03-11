@@ -62,6 +62,7 @@ final class ProcessMonitor: ObservableObject {
         let hostApp = detectHostApp(pid: pid)
         let status = determineStatus(cpu: cpuPercent, elapsed: elapsed)
         let jsonlPath = sessionResolver.resolveJSONLPath(cwd: cwd)
+        let activity = detectActivity(jsonlPath: jsonlPath)
 
         return ClaudeSession(
             id: pid,
@@ -72,7 +73,8 @@ final class ProcessMonitor: ObservableObject {
             memoryMB: rssMB,
             elapsedTime: elapsed,
             status: status,
-            jsonlPath: jsonlPath
+            jsonlPath: jsonlPath,
+            activity: activity
         )
     }
 
@@ -121,6 +123,65 @@ final class ProcessMonitor: ObservableObject {
             return true
         }
         return false
+    }
+
+    /// Lightweight activity detection: read last 2KB of JSONL
+    private func detectActivity(jsonlPath: String?) -> ClaudeActivity {
+        guard let path = jsonlPath,
+              let fh = FileHandle(forReadingAtPath: path) else { return .idle }
+        defer { fh.closeFile() }
+
+        let fileSize = fh.seekToEndOfFile()
+        guard fileSize > 0 else { return .idle }
+
+        // Check file modification time to distinguish responding vs idle
+        let fileURL = URL(fileURLWithPath: path)
+        let modDate = (try? FileManager.default.attributesOfItem(atPath: fileURL.path)[.modificationDate] as? Date) ?? Date.distantPast
+        let secondsSinceModified = Date().timeIntervalSince(modDate)
+        let isStale = secondsSinceModified > 5 // no writes for 5 seconds → turn is done
+
+        let chunkSize: UInt64 = min(fileSize, 2048)
+        fh.seek(toFileOffset: fileSize - chunkSize)
+        let data = fh.readDataToEndOfFile()
+        guard let content = String(data: data, encoding: .utf8) else { return .idle }
+
+        let lines = content.split(separator: "\n", omittingEmptySubsequences: true)
+
+        // Check if there are progress entries (= tool is actively producing output)
+        let hasProgress = lines.contains { $0.contains("\"progress\"") }
+
+        for line in lines.reversed() {
+            let s = String(line)
+
+            guard let jsonData = s.data(using: .utf8),
+                  let json = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] else { continue }
+
+            let type = json["type"] as? String ?? ""
+
+            switch type {
+            case "user":
+                return isStale ? .idle : .thinking
+            case "assistant":
+                guard let msg = json["message"] as? [String: Any],
+                      let blocks = msg["content"] as? [[String: Any]] else {
+                    return isStale ? .idle : .responding
+                }
+                for block in blocks {
+                    if block["type"] as? String == "tool_use" {
+                        // progress entries exist → tool is running
+                        // no progress → tool hasn't started (waiting for approval)
+                        if hasProgress && !isStale {
+                            return .toolRunning
+                        }
+                        return .idle
+                    }
+                }
+                return isStale ? .idle : .responding
+            default:
+                continue
+            }
+        }
+        return .idle
     }
 
     private func shell(_ command: String) -> String {
