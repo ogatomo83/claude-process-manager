@@ -15,14 +15,7 @@ struct SessionCardView: View {
 
     private var activity: ClaudeActivity { session.activity }
 
-    private var activityColor: Color {
-        switch activity {
-        case .thinking: return .purple
-        case .toolRunning: return .orange
-        case .responding: return .green
-        case .idle: return .cyan
-        }
-    }
+    private var activityColor: Color { activity.color }
 
     private var hostColor: Color {
         switch session.hostApp {
@@ -174,8 +167,8 @@ struct SessionCardView: View {
                     .rotationEffect(.degrees(orbitAngle + Double(i) * 120))
             }
 
-            // Rising particles (thinking/toolRunning)
-            if activity == .thinking || activity == .toolRunning {
+            // Rising particles (thinking/toolRunning/compacting)
+            if activity == .thinking || activity == .toolRunning || activity == .compacting {
                 ForEach(0..<4, id: \.self) { i in
                     Circle()
                         .fill(activityColor.opacity(Double(4 - i) / 6.0))
@@ -223,14 +216,7 @@ struct SessionCardView: View {
 
     // MARK: - Helpers
 
-    private var activityIcon: String {
-        switch activity {
-        case .thinking: return "brain"
-        case .toolRunning: return "gearshape"
-        case .responding: return "text.bubble"
-        case .idle: return "moon.zzz"
-        }
-    }
+    private var activityIcon: String { activity.icon }
 
     private var hostIcon: String {
         switch session.hostApp {
@@ -270,35 +256,49 @@ struct SessionCardView: View {
     // MARK: - Animations
 
     private func startAnimations() {
+        // Reset all animations to prevent accumulation
+        var t = Transaction()
+        t.disablesAnimations = true
+        withTransaction(t) {
+            orbitAngle = 0
+            pulseScale = 1.0
+            glowOpacity = 0.3
+            particleY = 0
+            tiltX = 0
+            tiltY = 0
+        }
+
         let speed: Double = {
             switch activity {
             case .thinking: return 1.5
             case .toolRunning: return 1.0
             case .responding: return 2.0
+            case .waitingPermission: return 2.5
+            case .compacting: return 1.8
             case .idle: return 5.0
             }
         }()
 
-        withAnimation(.linear(duration: speed * 2).repeatForever(autoreverses: false)) {
-            orbitAngle = 360
-        }
-
-        withAnimation(.easeInOut(duration: speed * 0.6).repeatForever(autoreverses: true)) {
-            pulseScale = activity == .idle ? 1.0 : 1.5
-            glowOpacity = activity == .idle ? 0.15 : 0.6
-        }
-
-        if activity == .thinking || activity == .toolRunning {
-            withAnimation(.easeInOut(duration: 1.2).repeatForever(autoreverses: true)) {
-                particleY = 10
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            withAnimation(.linear(duration: speed * 2).repeatForever(autoreverses: false)) {
+                orbitAngle = 360
             }
-        } else {
-            particleY = 0
-        }
 
-        withAnimation(.easeInOut(duration: 3).repeatForever(autoreverses: true)) {
-            tiltX = Double.random(in: -3...3)
-            tiltY = Double.random(in: -2...2)
+            withAnimation(.easeInOut(duration: speed * 0.6).repeatForever(autoreverses: true)) {
+                pulseScale = activity == .idle ? 1.0 : 1.5
+                glowOpacity = activity == .idle ? 0.15 : 0.6
+            }
+
+            if activity == .thinking || activity == .toolRunning {
+                withAnimation(.easeInOut(duration: 1.2).repeatForever(autoreverses: true)) {
+                    particleY = 10
+                }
+            }
+
+            withAnimation(.easeInOut(duration: 3).repeatForever(autoreverses: true)) {
+                tiltX = Double.random(in: -3...3)
+                tiltY = Double.random(in: -2...2)
+            }
         }
     }
 }

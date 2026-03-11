@@ -12,14 +12,7 @@ struct ClaudeStatusView: View {
     @State private var particleOffset: CGFloat = 0
     @State private var pulseScale: CGFloat = 1.0
 
-    private var coreColor: Color {
-        switch activity {
-        case .thinking: return .purple
-        case .toolRunning: return .orange
-        case .responding: return .green
-        case .idle: return .blue
-        }
-    }
+    private var coreColor: Color { activity.color }
 
     private var glowColor: Color {
         coreColor.opacity(0.3)
@@ -30,6 +23,8 @@ struct ClaudeStatusView: View {
         case .thinking: return 1.2
         case .toolRunning: return 0.8
         case .responding: return 1.5
+        case .waitingPermission: return 2.0
+        case .compacting: return 1.0
         case .idle: return 3.0
         }
     }
@@ -85,7 +80,7 @@ struct ClaudeStatusView: View {
             .opacity(coreOpacity)
 
             // Activity-specific particles
-            if activity == .thinking || activity == .toolRunning {
+            if activity == .thinking || activity == .toolRunning || activity == .compacting {
                 floatingParticles(color: coreColor)
             }
         }
@@ -128,34 +123,46 @@ struct ClaudeStatusView: View {
     // MARK: - Animations
 
     private func startAnimations() {
-        // Core breathing
-        withAnimation(.easeInOut(duration: animationSpeed).repeatForever(autoreverses: true)) {
-            coreScale = activity == .idle ? 1.05 : 1.2
-            coreOpacity = activity == .idle ? 0.7 : 1.0
-        }
-
-        // Ring rotation
-        withAnimation(.linear(duration: animationSpeed * 4).repeatForever(autoreverses: false)) {
-            ringRotation = 360
-        }
-
-        // Counter-rotation
-        withAnimation(.linear(duration: animationSpeed * 3).repeatForever(autoreverses: false)) {
-            ring2Rotation = -360
-        }
-
-        // Pulse
-        withAnimation(.easeInOut(duration: animationSpeed * 1.5).repeatForever(autoreverses: true)) {
-            pulseScale = activity == .idle ? 1.02 : 1.15
-        }
-
-        // Particle float
-        if activity == .thinking || activity == .toolRunning {
-            withAnimation(.easeInOut(duration: 1.5).repeatForever(autoreverses: true)) {
-                particleOffset = 8
-            }
-        } else {
+        // Reset all animations to prevent accumulation
+        var t = Transaction()
+        t.disablesAnimations = true
+        withTransaction(t) {
+            coreScale = 1.0
+            coreOpacity = 0.8
+            ringRotation = 0
+            ring2Rotation = 0
+            pulseScale = 1.0
             particleOffset = 0
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            // Core breathing
+            withAnimation(.easeInOut(duration: animationSpeed).repeatForever(autoreverses: true)) {
+                coreScale = activity == .idle ? 1.05 : 1.2
+                coreOpacity = activity == .idle ? 0.7 : 1.0
+            }
+
+            // Ring rotation
+            withAnimation(.linear(duration: animationSpeed * 4).repeatForever(autoreverses: false)) {
+                ringRotation = 360
+            }
+
+            // Counter-rotation
+            withAnimation(.linear(duration: animationSpeed * 3).repeatForever(autoreverses: false)) {
+                ring2Rotation = -360
+            }
+
+            // Pulse
+            withAnimation(.easeInOut(duration: animationSpeed * 1.5).repeatForever(autoreverses: true)) {
+                pulseScale = activity == .idle ? 1.02 : 1.15
+            }
+
+            // Particle float
+            if activity == .thinking || activity == .toolRunning {
+                withAnimation(.easeInOut(duration: 1.5).repeatForever(autoreverses: true)) {
+                    particleOffset = 8
+                }
+            }
         }
     }
 }

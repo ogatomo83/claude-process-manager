@@ -80,12 +80,14 @@ enum GroupingMode: String, CaseIterable {
     case custom = "Custom"
     case hostApp = "Host App"
     case activity = "Activity"
+    case vscode = "VSCode"
 
     var icon: String {
         switch self {
         case .custom: return "hand.draw"
         case .hostApp: return "rectangle.3.group"
         case .activity: return "bolt.circle"
+        case .vscode: return "chevron.left.forwardslash.chevron.right"
         }
     }
 }

@@ -3,6 +3,8 @@ import Combine
 
 final class ProcessMonitor: ObservableObject {
     @Published var sessions: [ClaudeSession] = []
+    @Published var vscodeWindows: [VSCodeWindow] = []
+    @Published var detectVSCode: Bool = false
 
     private var timer: Timer?
     private let sessionResolver = SessionResolver()
@@ -31,8 +33,25 @@ final class ProcessMonitor: ObservableObject {
                 }
             }
 
+            // Detect VSCode windows without Claude
+            var newVSCodeWindows: [VSCodeWindow] = []
+            if self.detectVSCode {
+                let allTitles = self.getVSCodeWindowTitles()
+                let claudeProjects = Set(
+                    newSessions
+                        .filter { $0.hostApp == .vscode }
+                        .map { $0.projectName }
+                )
+                newVSCodeWindows = allTitles
+                    .filter { title in
+                        !claudeProjects.contains { projName in title.contains(projName) }
+                    }
+                    .map { VSCodeWindow(windowTitle: $0) }
+            }
+
             DispatchQueue.main.async {
                 self.sessions = newSessions
+                self.vscodeWindows = newVSCodeWindows
             }
         }
     }
@@ -62,7 +81,7 @@ final class ProcessMonitor: ObservableObject {
         let hostApp = detectHostApp(pid: pid)
         let status = determineStatus(cpu: cpuPercent, elapsed: elapsed)
         let jsonlPath = sessionResolver.resolveJSONLPath(cwd: cwd)
-        let activity = detectActivity(jsonlPath: jsonlPath)
+        let activity = detectActivity(jsonlPath: jsonlPath, cpuPercent: cpuPercent)
 
         return ClaudeSession(
             id: pid,
@@ -125,8 +144,11 @@ final class ProcessMonitor: ObservableObject {
         return false
     }
 
-    /// Lightweight activity detection: read last 2KB of JSONL
-    private func detectActivity(jsonlPath: String?) -> ClaudeActivity {
+    /// Lightweight activity detection: read last 8KB of JSONL
+    /// Key insight: `turn_duration` is the ONLY reliable idle indicator.
+    /// During extended thinking ("Ruminating..."), no JSONL writes and low CPU
+    /// (thinking happens server-side), so staleness/CPU heuristics don't work.
+    private func detectActivity(jsonlPath: String?, cpuPercent: Double) -> ClaudeActivity {
         guard let path = jsonlPath,
               let fh = FileHandle(forReadingAtPath: path) else { return .idle }
         defer { fh.closeFile() }
@@ -134,21 +156,17 @@ final class ProcessMonitor: ObservableObject {
         let fileSize = fh.seekToEndOfFile()
         guard fileSize > 0 else { return .idle }
 
-        // Check file modification time to distinguish responding vs idle
+        // Staleness only used as fallback for streaming states (responding)
         let fileURL = URL(fileURLWithPath: path)
         let modDate = (try? FileManager.default.attributesOfItem(atPath: fileURL.path)[.modificationDate] as? Date) ?? Date.distantPast
         let secondsSinceModified = Date().timeIntervalSince(modDate)
-        let isStale = secondsSinceModified > 5 // no writes for 5 seconds → turn is done
 
-        let chunkSize: UInt64 = min(fileSize, 2048)
+        let chunkSize: UInt64 = min(fileSize, 8192)
         fh.seek(toFileOffset: fileSize - chunkSize)
         let data = fh.readDataToEndOfFile()
         guard let content = String(data: data, encoding: .utf8) else { return .idle }
 
         let lines = content.split(separator: "\n", omittingEmptySubsequences: true)
-
-        // Check if there are progress entries (= tool is actively producing output)
-        let hasProgress = lines.contains { $0.contains("\"progress\"") }
 
         for line in lines.reversed() {
             let s = String(line)
@@ -159,29 +177,84 @@ final class ProcessMonitor: ObservableObject {
             let type = json["type"] as? String ?? ""
 
             switch type {
+            case "file-history-snapshot":
+                continue
+
+            // progress events = tool is actively producing output
+            case "progress":
+                return secondsSinceModified > 5 ? .idle : .toolRunning
+
+            case "system":
+                let subtype = json["subtype"] as? String ?? ""
+                if subtype == "turn_duration" {
+                    // Definitive: turn ended → idle
+                    return .idle
+                }
+                if subtype == "compact_boundary" {
+                    return secondsSinceModified > 10 ? .idle : .compacting
+                }
+                continue
+
             case "user":
-                return isStale ? .idle : .thinking
+                // user message or tool_result → Claude is thinking
+                // No staleness check: thinking/Ruminating can take minutes
+                // Process existence (PID check) guarantees Claude is alive
+                return .thinking
+
             case "assistant":
                 guard let msg = json["message"] as? [String: Any],
                       let blocks = msg["content"] as? [[String: Any]] else {
-                    return isStale ? .idle : .responding
+                    return secondsSinceModified > 30 ? .idle : .responding
                 }
-                for block in blocks {
-                    if block["type"] as? String == "tool_use" {
-                        // progress entries exist → tool is running
-                        // no progress → tool hasn't started (waiting for approval)
-                        if hasProgress && !isStale {
-                            return .toolRunning
-                        }
-                        return .idle
-                    }
+                let blockTypes = blocks.compactMap { $0["type"] as? String }
+
+                // Extended thinking block (no text/tool_use yet)
+                if blockTypes.contains("thinking") && !blockTypes.contains("text") && !blockTypes.contains("tool_use") {
+                    return .thinking
                 }
-                return isStale ? .idle : .responding
+                // tool_use without subsequent progress/tool_result → awaiting approval
+                if blockTypes.contains("tool_use") {
+                    return .waitingPermission
+                }
+                // Text response — use generous staleness as fallback
+                // (turn_duration should handle idle, but just in case)
+                return secondsSinceModified > 30 ? .idle : .responding
+
             default:
                 continue
             }
         }
         return .idle
+    }
+
+    private func getVSCodeWindowTitles() -> [String] {
+        let script = """
+        tell application "System Events"
+            set windowTitles to {}
+            set processNames to {"Electron", "Code", "Visual Studio Code"}
+            repeat with procName in processNames
+                if exists process procName then
+                    tell process procName
+                        set windowTitles to name of every window
+                    end tell
+                    exit repeat
+                end if
+            end repeat
+            return windowTitles
+        end tell
+        """
+        let appleScript = NSAppleScript(source: script)
+        var error: NSDictionary?
+        let result = appleScript?.executeAndReturnError(&error)
+
+        guard let listDesc = result else { return [] }
+        var titles: [String] = []
+        for i in 1...listDesc.numberOfItems {
+            if let item = listDesc.atIndex(i)?.stringValue {
+                titles.append(item)
+            }
+        }
+        return titles
     }
 
     private func shell(_ command: String) -> String {

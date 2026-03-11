@@ -43,6 +43,7 @@ struct CanvasWorkspaceView: View {
 
     // Animation
     @State private var energyPhase: Double = 0
+    @State private var energyTimer: Timer?
 
     private var visibleSessions: [ClaudeSession] {
         if showAllHostApps {
@@ -112,6 +113,8 @@ struct CanvasWorkspaceView: View {
         .onDisappear {
             monitor.stop()
             conversationLoader.stop()
+            energyTimer?.invalidate()
+            energyTimer = nil
             if let monitor = scrollMonitor {
                 NSEvent.removeMonitor(monitor)
                 scrollMonitor = nil
@@ -123,12 +126,22 @@ struct CanvasWorkspaceView: View {
                 applyAutoGrouping()
             }
         }
+        .onChange(of: monitor.vscodeWindows.count) { _ in
+            autoLayoutNewCards()
+            if groupingMode == .vscode {
+                applyAutoGrouping()
+            }
+        }
         .onReceive(monitor.$sessions) { _ in
             evaluateGroupRules()
         }
     }
 
     private func installScrollMonitor() {
+        if let existing = scrollMonitor {
+            NSEvent.removeMonitor(existing)
+            scrollMonitor = nil
+        }
         scrollMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { event in
             guard event.modifierFlags.contains(.command) else { return event }
             let delta = event.scrollingDeltaY
@@ -213,6 +226,13 @@ struct CanvasWorkspaceView: View {
             // Session cards
             ForEach(visibleSessions) { session in
                 cardView(session: session)
+            }
+
+            // VSCode-only window cards
+            if monitor.detectVSCode {
+                ForEach(monitor.vscodeWindows) { window in
+                    vscodeCardView(window: window)
+                }
             }
         }
     }
@@ -301,6 +321,88 @@ struct CanvasWorkspaceView: View {
                         Label("Remove from \(group.name)", systemImage: "minus.circle")
                     }
                 }
+            }
+        }
+    }
+
+    private func vscodeCardView(window: VSCodeWindow) -> some View {
+        let pos = cardPositions[window.id] ?? CGPoint(x: 400, y: 300)
+        return VSCodeCardView(
+            window: window,
+            isSelected: selectedPID == window.id,
+            isHovered: hoveredPID == window.id
+        )
+        .position(
+            x: pos.x * canvasScale + canvasOffset.width,
+            y: pos.y * canvasScale + canvasOffset.height
+        )
+        .onHover { isHovered in
+            withAnimation(.easeOut(duration: 0.15)) {
+                hoveredPID = isHovered ? window.id : nil
+            }
+        }
+        .onTapGesture(count: 2) {
+            windowSwitcher.activateVSCodeWindow(projectName: window.projectName)
+        }
+        .onTapGesture(count: 1) {
+            withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
+                if selectedPID == window.id {
+                    selectedPID = nil
+                } else {
+                    selectedPID = window.id
+                    showDetail = false
+                }
+            }
+        }
+        .gesture(makeCardDragGesture(pid: window.id))
+        .contextMenu {
+            // Launch Claude in this VSCode window
+            Button {
+                let launcher = ProjectLauncher()
+                let entry = ProjectEntry(
+                    id: window.windowTitle,
+                    name: window.projectName,
+                    parentDir: "",
+                    path: "",
+                    hasClaudeSession: false,
+                    isVSCodeOpen: true
+                )
+                launcher.launch(project: entry)
+            } label: {
+                Label("Launch Claude", systemImage: "play.circle")
+            }
+
+            // Add to existing group
+            if !groups.isEmpty {
+                Menu("Add to Group") {
+                    ForEach(groups) { group in
+                        Button {
+                            if let idx = groups.firstIndex(where: { $0.id == group.id }) {
+                                withAnimation(.spring(response: 0.3)) {
+                                    groups[idx].memberPIDs.insert(window.id)
+                                }
+                            }
+                        } label: {
+                            Label(group.name, systemImage: "folder")
+                        }
+                    }
+                }
+            }
+
+            // New group with this card
+            Button {
+                var newGroup = CanvasGroup.randomPreset(
+                    memberPIDs: [window.id],
+                    position: cardPositions[window.id] ?? .zero
+                )
+                newGroup.name = window.projectName
+                withAnimation(.spring(response: 0.5)) {
+                    groups.append(newGroup)
+                    editingGroupID = newGroup.id
+                    editingGroupName = newGroup.name
+                }
+            } label: {
+                Label("New Group with This Card", systemImage: "plus.rectangle.on.folder")
             }
         }
     }
@@ -781,12 +883,21 @@ struct CanvasWorkspaceView: View {
             return
         }
 
-        // Find cards inside the lasso
-        let enclosedPIDs = monitor.sessions.filter { session in
+        // Find cards inside the lasso (Claude sessions + VSCode windows)
+        var enclosedPIDs = monitor.sessions.filter { session in
             guard let pos = cardPositions[session.id] else { return false }
             let screenPos = canvasPoint(pos)
             return isPointInPolygon(point: screenPos, polygon: lassoPoints)
         }.map { $0.id }
+
+        if monitor.detectVSCode {
+            let vscodeIDs = monitor.vscodeWindows.filter { window in
+                guard let pos = cardPositions[window.id] else { return false }
+                let screenPos = canvasPoint(pos)
+                return isPointInPolygon(point: screenPos, polygon: lassoPoints)
+            }.map { $0.id }
+            enclosedPIDs += vscodeIDs
+        }
 
         if !enclosedPIDs.isEmpty {
             // Remove these PIDs from any existing groups
@@ -1014,6 +1125,8 @@ struct CanvasWorkspaceView: View {
                 Button("Thinking") { addRule(.activity(.thinking), to: group) }
                 Button("Running tool") { addRule(.activity(.toolRunning), to: group) }
                 Button("Responding") { addRule(.activity(.responding), to: group) }
+                Button("Awaiting approval") { addRule(.activity(.waitingPermission), to: group) }
+                Button("Compacting") { addRule(.activity(.compacting), to: group) }
                 Button("Idle") { addRule(.activity(.idle), to: group) }
             }
             Button("Path Prefix...") {
@@ -1214,6 +1327,35 @@ struct CanvasWorkspaceView: View {
             }
             .buttonStyle(.plain)
 
+            // VSCode detection toggle
+            Button {
+                withAnimation(.spring(response: 0.3)) {
+                    monitor.detectVSCode.toggle()
+                    if monitor.detectVSCode {
+                        monitor.refresh()
+                    } else {
+                        // Remove VSCode window positions
+                        for window in monitor.vscodeWindows {
+                            cardPositions.removeValue(forKey: window.id)
+                        }
+                    }
+                }
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "chevron.left.forwardslash.chevron.right")
+                    Text(monitor.detectVSCode ? "VSCode ON" : "VSCode")
+                        .font(.system(size: 11))
+                }
+                .foregroundStyle(monitor.detectVSCode ? .blue : .white.opacity(0.5))
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(monitor.detectVSCode ? .blue.opacity(0.1) : .white.opacity(0.04))
+                )
+            }
+            .buttonStyle(.plain)
+
             Divider().frame(height: 16).overlay(Color.white.opacity(0.15))
 
             // Grouping mode selector
@@ -1394,17 +1536,49 @@ struct CanvasWorkspaceView: View {
 
         case .activity:
             let byActivity = Dictionary(grouping: monitor.sessions) { $0.activity }
-            let colors: [ClaudeActivity: Color] = [.thinking: .purple, .toolRunning: .orange, .responding: .green, .idle: .cyan]
-            let names: [ClaudeActivity: String] = [.thinking: "Thinking", .toolRunning: "Working", .responding: "Responding", .idle: "Idle"]
+            let names: [ClaudeActivity: String] = [
+                .thinking: "Thinking", .toolRunning: "Working", .responding: "Responding",
+                .waitingPermission: "Awaiting", .compacting: "Compacting", .idle: "Idle"
+            ]
             for (activity, sessions) in byActivity {
                 let group = CanvasGroup(
                     id: UUID(),
                     name: names[activity] ?? "Unknown",
-                    color: colors[activity] ?? .gray,
+                    color: activity.color,
                     memberPIDs: Set(sessions.map { $0.id }),
                     position: .zero,
                     size: .zero,
                     style: .nebula
+                )
+                groups.append(group)
+            }
+
+        case .vscode:
+            // Group 1: VSCode + Claude
+            let vscodeClaude = monitor.sessions.filter { $0.hostApp == .vscode }
+            if !vscodeClaude.isEmpty {
+                let group = CanvasGroup(
+                    id: UUID(),
+                    name: "VSCode + Claude",
+                    color: .blue,
+                    memberPIDs: Set(vscodeClaude.map { $0.id }),
+                    position: .zero,
+                    size: .zero,
+                    style: .circuit
+                )
+                groups.append(group)
+            }
+
+            // Group 2: VSCode Only (no Claude)
+            if !monitor.vscodeWindows.isEmpty {
+                let group = CanvasGroup(
+                    id: UUID(),
+                    name: "VSCode Only",
+                    color: .gray,
+                    memberPIDs: Set(monitor.vscodeWindows.map { $0.id }),
+                    position: .zero,
+                    size: .zero,
+                    style: .constellation
                 )
                 groups.append(group)
             }
@@ -1419,9 +1593,10 @@ struct CanvasWorkspaceView: View {
     // MARK: - Layout
 
     private func autoLayoutNewCards() {
+        let totalCount = monitor.sessions.count + (monitor.detectVSCode ? monitor.vscodeWindows.count : 0)
         for (index, session) in monitor.sessions.enumerated() {
             if cardPositions[session.id] == nil {
-                let angle = Double(index) * (2 * .pi / max(Double(monitor.sessions.count), 1))
+                let angle = Double(index) * (2 * .pi / max(Double(totalCount), 1))
                 let radius: CGFloat = 200
                 withAnimation(.spring(response: 0.6, dampingFraction: 0.7)) {
                     cardPositions[session.id] = CGPoint(
@@ -1431,16 +1606,38 @@ struct CanvasWorkspaceView: View {
                 }
             }
         }
+        if monitor.detectVSCode {
+            for (index, window) in monitor.vscodeWindows.enumerated() {
+                if cardPositions[window.id] == nil {
+                    let angle = Double(monitor.sessions.count + index) * (2 * .pi / max(Double(totalCount), 1))
+                    let radius: CGFloat = 200
+                    withAnimation(.spring(response: 0.6, dampingFraction: 0.7)) {
+                        cardPositions[window.id] = CGPoint(
+                            x: 400 + radius * CGFloat(cos(angle)),
+                            y: 300 + radius * CGFloat(sin(angle))
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    private var allCardIDs: [Int32] {
+        var ids = monitor.sessions.map { $0.id }
+        if monitor.detectVSCode {
+            ids += monitor.vscodeWindows.map { $0.id }
+        }
+        return ids
     }
 
     private func autoLayoutAllCards() {
+        let allIDs = allCardIDs
         if groups.isEmpty {
             // No groups: circular layout
-            let sessions = monitor.sessions
-            for (i, session) in sessions.enumerated() {
-                let angle = Double(i) * (2 * .pi / max(Double(sessions.count), 1)) - .pi / 2
-                let radius: CGFloat = sessions.count == 1 ? 0 : CGFloat(80 + sessions.count * 40)
-                cardPositions[session.id] = CGPoint(
+            for (i, id) in allIDs.enumerated() {
+                let angle = Double(i) * (2 * .pi / max(Double(allIDs.count), 1)) - .pi / 2
+                let radius: CGFloat = allIDs.count == 1 ? 0 : CGFloat(80 + allIDs.count * 40)
+                cardPositions[id] = CGPoint(
                     x: 400 + radius * CGFloat(cos(angle)),
                     y: 300 + radius * CGFloat(sin(angle))
                 )
@@ -1448,7 +1645,7 @@ struct CanvasWorkspaceView: View {
         } else {
             // Layout by groups in clusters
             var groupIndex = 0
-            let ungroupedPIDs = Set(monitor.sessions.map { $0.id }).subtracting(groups.flatMap { $0.memberPIDs })
+            let ungroupedIDs = Set(allIDs).subtracting(groups.flatMap { $0.memberPIDs })
 
             for group in groups {
                 let pids = Array(group.memberPIDs)
@@ -1467,7 +1664,7 @@ struct CanvasWorkspaceView: View {
             }
 
             // Ungrouped cards
-            let ungrouped = Array(ungroupedPIDs)
+            let ungrouped = Array(ungroupedIDs)
             if !ungrouped.isEmpty {
                 let startX: CGFloat = 350 + CGFloat(groupIndex) * 400
                 for (i, pid) in ungrouped.enumerated() {
@@ -1553,12 +1750,7 @@ struct CanvasWorkspaceView: View {
     }
 
     private func activityColor(_ activity: ClaudeActivity) -> Color {
-        switch activity {
-        case .thinking: return .purple
-        case .toolRunning: return .orange
-        case .responding: return .green
-        case .idle: return .blue
-        }
+        activity.color
     }
 
     private func styleIcon(_ style: CanvasGroup.GroupStyle) -> String {
@@ -1586,7 +1778,8 @@ struct CanvasWorkspaceView: View {
     }
 
     private func startEnergyAnimation() {
-        Timer.scheduledTimer(withTimeInterval: 1.0 / 30.0, repeats: true) { _ in
+        energyTimer?.invalidate()
+        energyTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 15.0, repeats: true) { _ in
             energyPhase += 1
         }
     }

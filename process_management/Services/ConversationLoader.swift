@@ -244,6 +244,14 @@ final class ConversationLoader: ObservableObject {
         defer { fh.closeFile() }
 
         let fileSize = fh.seekToEndOfFile()
+        guard fileSize > 0 else { return .idle }
+
+        // Check file modification time for staleness
+        let fileURL = URL(fileURLWithPath: path)
+        let modDate = (try? FileManager.default.attributesOfItem(atPath: fileURL.path)[.modificationDate] as? Date) ?? Date.distantPast
+        let secondsSinceModified = Date().timeIntervalSince(modDate)
+        let isStale = secondsSinceModified > 5
+
         let chunkSize: UInt64 = min(fileSize, 4096)
         fh.seek(toFileOffset: fileSize - chunkSize)
         let data = fh.readDataToEndOfFile()
@@ -251,20 +259,74 @@ final class ConversationLoader: ObservableObject {
 
         let lines = content.split(separator: "\n", omittingEmptySubsequences: true)
 
-        // Check from the last line backwards
+        // Check if there are progress entries (= tool is actively producing output)
+        let hasProgress = lines.contains { $0.contains("\"progress\"") }
+
         for line in lines.reversed() {
-            if let activity = detectActivityFromLine(String(line)) {
-                return activity
+            let s = String(line)
+
+            // Quick check for compact_boundary
+            if s.contains("\"compact_boundary\"") {
+                return isStale ? .idle : .compacting
+            }
+
+            guard let jsonData = s.data(using: .utf8),
+                  let json = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] else { continue }
+
+            let type = json["type"] as? String ?? ""
+
+            switch type {
+            case "system":
+                let subtype = json["subtype"] as? String ?? ""
+                if subtype == "compact_boundary" {
+                    return isStale ? .idle : .compacting
+                }
+                continue
+
+            case "user":
+                // Check if this is a tool_result (intermediate state)
+                if let message = json["message"] as? [String: Any] {
+                    if let contentArray = message["content"] as? [[String: Any]] {
+                        let isToolResult = contentArray.contains { ($0["type"] as? String) == "tool_result" }
+                        if isToolResult { continue }
+                    }
+                }
+                return isStale ? .idle : .thinking
+
+            case "assistant":
+                guard let message = json["message"] as? [String: Any],
+                      let contentArray = message["content"] as? [[String: Any]] else {
+                    return isStale ? .idle : .responding
+                }
+                for block in contentArray {
+                    let blockType = block["type"] as? String ?? ""
+                    if blockType == "tool_use" {
+                        if hasProgress && !isStale { return .toolRunning }
+                        if !isStale { return .waitingPermission }
+                        return .idle
+                    }
+                    if blockType == "text" {
+                        return isStale ? .idle : .responding
+                    }
+                }
+                return isStale ? .idle : .responding
+
+            default:
+                continue
             }
         }
         return .idle
     }
 
-    /// Determine activity from a single JSONL line
+    /// Determine activity from a single JSONL line (used for streaming updates)
     private func detectActivityFromLine(_ line: String) -> ClaudeActivity? {
         // Quick string checks before JSON parsing
         if line.contains("\"progress\"") {
             return .toolRunning
+        }
+
+        if line.contains("\"compact_boundary\"") {
+            return .compacting
         }
 
         guard let data = line.data(using: .utf8),
@@ -275,15 +337,26 @@ final class ConversationLoader: ObservableObject {
         let type = json["type"] as? String ?? ""
 
         switch type {
+        case "system":
+            let subtype = json["subtype"] as? String ?? ""
+            if subtype == "compact_boundary" { return .compacting }
+            return nil
+
         case "user":
+            // Check if this is a tool_result
+            if let message = json["message"] as? [String: Any],
+               let contentArray = message["content"] as? [[String: Any]] {
+                let isToolResult = contentArray.contains { ($0["type"] as? String) == "tool_result" }
+                if isToolResult { return .toolRunning }
+            }
             return .thinking
 
         case "assistant":
             guard let message = json["message"] as? [String: Any],
-                  let contentArray = message["content"] as? [[String: Any]] else { return nil }
+                  let contentArray = message["content"] as? [[String: Any]] else { return .responding }
             for block in contentArray {
                 let blockType = block["type"] as? String ?? ""
-                if blockType == "tool_use" { return .toolRunning }
+                if blockType == "tool_use" { return .waitingPermission }
                 if blockType == "text" { return .responding }
             }
             return .responding

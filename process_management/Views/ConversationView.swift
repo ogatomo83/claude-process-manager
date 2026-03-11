@@ -75,14 +75,7 @@ struct ConversationView: View {
         .padding(.vertical, 8)
     }
 
-    private var activityColor: Color {
-        switch loader.activity {
-        case .thinking: return .purple
-        case .toolRunning: return .orange
-        case .responding: return .green
-        case .idle: return .secondary
-        }
-    }
+    private var activityColor: Color { loader.activity.color }
 
     private func statusBackground(_ status: SessionStatus) -> Color {
         switch status {
