@@ -8,6 +8,7 @@ final class ProcessMonitor: ObservableObject {
 
     private var timer: Timer?
     private let sessionResolver = SessionResolver()
+    private var previousActivities: [Int32: ClaudeActivity] = [:]
 
     func start() {
         refresh()
@@ -50,6 +51,17 @@ final class ProcessMonitor: ObservableObject {
             }
 
             DispatchQueue.main.async {
+                // Detect idle transitions and send notifications
+                for session in newSessions {
+                    let previous = self.previousActivities[session.id]
+                    if let previous, previous != .idle, session.activity == .idle {
+                        NotificationService.shared.notifyTurnCompleted(sessionName: session.projectName)
+                    }
+                }
+                self.previousActivities = Dictionary(
+                    uniqueKeysWithValues: newSessions.map { ($0.id, $0.activity) }
+                )
+
                 self.sessions = newSessions
                 self.vscodeWindows = newVSCodeWindows
             }
@@ -144,8 +156,9 @@ final class ProcessMonitor: ObservableObject {
         return false
     }
 
-    /// Lightweight activity detection: read last 8KB of JSONL
-    /// Key insight: `turn_duration` is the ONLY reliable idle indicator.
+    /// Lightweight activity detection: read last 64KB of JSONL
+    /// Idle detection: turn_duration (definitive), or file-history-snapshot
+    /// after assistant text (turn_duration is not always written).
     /// During extended thinking ("Ruminating..."), no JSONL writes and low CPU
     /// (thinking happens server-side), so staleness/CPU heuristics don't work.
     private func detectActivity(jsonlPath: String?, cpuPercent: Double) -> ClaudeActivity {
@@ -156,17 +169,20 @@ final class ProcessMonitor: ObservableObject {
         let fileSize = fh.seekToEndOfFile()
         guard fileSize > 0 else { return .idle }
 
-        // Staleness only used as fallback for streaming states (responding)
         let fileURL = URL(fileURLWithPath: path)
         let modDate = (try? FileManager.default.attributesOfItem(atPath: fileURL.path)[.modificationDate] as? Date) ?? Date.distantPast
         let secondsSinceModified = Date().timeIntervalSince(modDate)
 
-        let chunkSize: UInt64 = min(fileSize, 8192)
+        let chunkSize: UInt64 = min(fileSize, 65536)
         fh.seek(toFileOffset: fileSize - chunkSize)
         let data = fh.readDataToEndOfFile()
         guard let content = String(data: data, encoding: .utf8) else { return .idle }
 
         let lines = content.split(separator: "\n", omittingEmptySubsequences: true)
+
+        // Track whether file-history-snapshot was seen before hitting assistant/user
+        // If assistant text is followed by file-history-snapshot → turn is complete
+        var sawFileHistorySnapshot = false
 
         for line in lines.reversed() {
             let s = String(line)
@@ -178,6 +194,7 @@ final class ProcessMonitor: ObservableObject {
 
             switch type {
             case "file-history-snapshot":
+                sawFileHistorySnapshot = true
                 continue
 
             // progress events = tool is actively producing output
@@ -187,7 +204,6 @@ final class ProcessMonitor: ObservableObject {
             case "system":
                 let subtype = json["subtype"] as? String ?? ""
                 if subtype == "turn_duration" {
-                    // Definitive: turn ended → idle
                     return .idle
                 }
                 if subtype == "compact_boundary" {
@@ -196,15 +212,12 @@ final class ProcessMonitor: ObservableObject {
                 continue
 
             case "user":
-                // user message or tool_result → Claude is thinking
-                // No staleness check: thinking/Ruminating can take minutes
-                // Process existence (PID check) guarantees Claude is alive
                 return .thinking
 
             case "assistant":
                 guard let msg = json["message"] as? [String: Any],
                       let blocks = msg["content"] as? [[String: Any]] else {
-                    return secondsSinceModified > 30 ? .idle : .responding
+                    return secondsSinceModified > 5 ? .idle : .responding
                 }
                 let blockTypes = blocks.compactMap { $0["type"] as? String }
 
@@ -216,9 +229,12 @@ final class ProcessMonitor: ObservableObject {
                 if blockTypes.contains("tool_use") {
                     return .waitingPermission
                 }
-                // Text response — use generous staleness as fallback
-                // (turn_duration should handle idle, but just in case)
-                return secondsSinceModified > 30 ? .idle : .responding
+                // Text response followed by file-history-snapshot → turn complete
+                if sawFileHistorySnapshot {
+                    return .idle
+                }
+                // Still streaming — fall back to staleness check
+                return secondsSinceModified > 5 ? .idle : .responding
 
             default:
                 continue

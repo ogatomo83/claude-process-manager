@@ -2,6 +2,10 @@ import SwiftUI
 
 @main
 struct process_managementApp: App {
+    init() {
+        NotificationService.shared.requestPermission()
+    }
+
     var body: some Scene {
         WindowGroup {
             ContentView()
