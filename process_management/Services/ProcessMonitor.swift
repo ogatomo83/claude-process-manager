@@ -1,5 +1,6 @@
 import Foundation
 import Combine
+import CoreGraphics
 
 final class ProcessMonitor: ObservableObject {
     @Published var sessions: [ClaudeSession] = []
@@ -244,31 +245,21 @@ final class ProcessMonitor: ObservableObject {
     }
 
     private func getVSCodeWindowTitles() -> [String] {
-        let script = """
-        tell application "System Events"
-            set windowTitles to {}
-            set processNames to {"Electron", "Code", "Visual Studio Code"}
-            repeat with procName in processNames
-                if exists process procName then
-                    tell process procName
-                        set windowTitles to name of every window
-                    end tell
-                    exit repeat
-                end if
-            end repeat
-            return windowTitles
-        end tell
-        """
-        let appleScript = NSAppleScript(source: script)
-        var error: NSDictionary?
-        let result = appleScript?.executeAndReturnError(&error)
+        // Use CGWindowListCopyWindowInfo instead of AppleScript
+        // Works across all Spaces including full-screen windows
+        guard let windowList = CGWindowListCopyWindowInfo(
+            [.optionAll, .excludeDesktopElements], kCGNullWindowID
+        ) as? [[String: Any]] else { return [] }
 
-        guard let listDesc = result else { return [] }
+        let vscodeOwners: Set<String> = ["Electron", "Code", "Visual Studio Code"]
         var titles: [String] = []
-        for i in 1...listDesc.numberOfItems {
-            if let item = listDesc.atIndex(i)?.stringValue {
-                titles.append(item)
-            }
+
+        for window in windowList {
+            guard let owner = window[kCGWindowOwnerName as String] as? String,
+                  vscodeOwners.contains(owner),
+                  let name = window[kCGWindowName as String] as? String,
+                  !name.isEmpty else { continue }
+            titles.append(name)
         }
         return titles
     }
@@ -276,8 +267,9 @@ final class ProcessMonitor: ObservableObject {
     private func shell(_ command: String) -> String {
         let process = Process()
         let pipe = Pipe()
-        process.executableURL = URL(fileURLWithPath: "/bin/zsh")
+        process.executableURL = URL(fileURLWithPath: "/bin/sh")
         process.arguments = ["-c", command]
+        process.currentDirectoryURL = URL(fileURLWithPath: NSHomeDirectory())
         process.standardOutput = pipe
         process.standardError = FileHandle.nullDevice
 

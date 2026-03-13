@@ -22,7 +22,7 @@ struct ConversationView: View {
                         }
                         .padding(.vertical, 8)
                     }
-                    .onChange(of: loader.messages.count) { _ in
+                    .onChange(of: loader.messages.count) { _, _ in
                         if let last = loader.messages.last {
                             withAnimation(.easeOut(duration: 0.2)) {
                                 proxy.scrollTo(last.id, anchor: .bottom)

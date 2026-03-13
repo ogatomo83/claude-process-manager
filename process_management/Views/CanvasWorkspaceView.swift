@@ -99,7 +99,7 @@ struct CanvasWorkspaceView: View {
         .background(
             GeometryReader { geo in
                 Color.clear.onAppear { viewSize = geo.size }
-                    .onChange(of: geo.size) { newSize in viewSize = newSize }
+                    .onChange(of: geo.size) { _, newSize in viewSize = newSize }
             }
         )
         .onAppear {
@@ -120,13 +120,13 @@ struct CanvasWorkspaceView: View {
                 scrollMonitor = nil
             }
         }
-        .onChange(of: monitor.sessions.count) { _ in
+        .onChange(of: monitor.sessions.count) { _, _ in
             autoLayoutNewCards()
             if groupingMode != .custom {
                 applyAutoGrouping()
             }
         }
-        .onChange(of: monitor.vscodeWindows.count) { _ in
+        .onChange(of: monitor.vscodeWindows.count) { _, _ in
             autoLayoutNewCards()
             if groupingMode == .vscode {
                 applyAutoGrouping()
@@ -278,7 +278,7 @@ struct CanvasWorkspaceView: View {
                         Button {
                             if let idx = groups.firstIndex(where: { $0.id == group.id }) {
                                 withAnimation(.spring(response: 0.3)) {
-                                    groups[idx].memberPIDs.insert(session.id)
+                                    _ = groups[idx].memberPIDs.insert(session.id)
                                 }
                             }
                         } label: {
@@ -312,7 +312,7 @@ struct CanvasWorkspaceView: View {
                     Button(role: .destructive) {
                         if let idx = groups.firstIndex(where: { $0.id == group.id }) {
                             withAnimation(.spring(response: 0.3)) {
-                                groups[idx].memberPIDs.remove(session.id)
+                                _ = groups[idx].memberPIDs.remove(session.id)
                             }
                             // Clean up empty groups
                             groups.removeAll { $0.memberPIDs.isEmpty && $0.rules.isEmpty }
@@ -379,7 +379,7 @@ struct CanvasWorkspaceView: View {
                         Button {
                             if let idx = groups.firstIndex(where: { $0.id == group.id }) {
                                 withAnimation(.spring(response: 0.3)) {
-                                    groups[idx].memberPIDs.insert(window.id)
+                                    _ = groups[idx].memberPIDs.insert(window.id)
                                 }
                             }
                         } label: {
@@ -413,20 +413,18 @@ struct CanvasWorkspaceView: View {
     private func groupVisual(group: CanvasGroup) -> some View {
         let memberPositions = group.memberPIDs.compactMap { cardPositions[$0] }
         if !memberPositions.isEmpty {
-            let visual: AnyView = {
+            Group {
                 switch group.style {
                 case .nebula:
-                    return AnyView(nebulaGroup(group: group, positions: memberPositions))
+                    nebulaGroup(group: group, positions: memberPositions)
                 case .constellation:
-                    return AnyView(constellationGroup(group: group, positions: memberPositions))
+                    constellationGroup(group: group, positions: memberPositions)
                 case .aurora:
-                    return AnyView(auroraGroup(group: group, positions: memberPositions))
+                    auroraGroup(group: group, positions: memberPositions)
                 case .circuit:
-                    return AnyView(circuitGroup(group: group, positions: memberPositions))
+                    circuitGroup(group: group, positions: memberPositions)
                 }
-            }()
-
-            visual
+            }
                 .contextMenu {
                     Button {
                         withAnimation(.spring(response: 0.3)) {
@@ -447,7 +445,7 @@ struct CanvasWorkspaceView: View {
                                 Button {
                                     if let idx = groups.firstIndex(where: { $0.id == group.id }) {
                                         withAnimation(.spring(response: 0.3)) {
-                                            groups[idx].memberPIDs.insert(session.id)
+                                            _ = groups[idx].memberPIDs.insert(session.id)
                                         }
                                     }
                                 } label: {
@@ -465,7 +463,7 @@ struct CanvasWorkspaceView: View {
                                 Button {
                                     if let idx = groups.firstIndex(where: { $0.id == group.id }) {
                                         withAnimation(.spring(response: 0.3)) {
-                                            groups[idx].memberPIDs.remove(session.id)
+                                            _ = groups[idx].memberPIDs.remove(session.id)
                                         }
                                         groups.removeAll { $0.memberPIDs.isEmpty && $0.rules.isEmpty }
                                     }
@@ -553,27 +551,25 @@ struct CanvasWorkspaceView: View {
         return ZStack {
             // Star field background
             Canvas { context, size in
-                // Draw constellation lines
+                // Draw constellation lines (O(n) chain)
                 if scaledPositions.count > 1 {
-                    for i in 0..<scaledPositions.count {
-                        for j in (i + 1)..<scaledPositions.count {
-                            let from = CGPoint(
-                                x: scaledPositions[i].x - center.x + size.width / 2,
-                                y: scaledPositions[i].y - center.y + size.height / 2
-                            )
-                            let to = CGPoint(
-                                x: scaledPositions[j].x - center.x + size.width / 2,
-                                y: scaledPositions[j].y - center.y + size.height / 2
-                            )
-                            var path = Path()
-                            path.move(to: from)
-                            path.addLine(to: to)
-                            context.stroke(
-                                path,
-                                with: .color(group.color.opacity(0.15)),
-                                style: StrokeStyle(lineWidth: 1, dash: [4, 4])
-                            )
-                        }
+                    for i in 0..<(scaledPositions.count - 1) {
+                        let from = CGPoint(
+                            x: scaledPositions[i].x - center.x + size.width / 2,
+                            y: scaledPositions[i].y - center.y + size.height / 2
+                        )
+                        let to = CGPoint(
+                            x: scaledPositions[i + 1].x - center.x + size.width / 2,
+                            y: scaledPositions[i + 1].y - center.y + size.height / 2
+                        )
+                        var path = Path()
+                        path.move(to: from)
+                        path.addLine(to: to)
+                        context.stroke(
+                            path,
+                            with: .color(group.color.opacity(0.15)),
+                            style: StrokeStyle(lineWidth: 1, dash: [4, 4])
+                        )
                     }
                 }
 
@@ -777,48 +773,47 @@ struct CanvasWorkspaceView: View {
                 let pids = Array(group.memberPIDs)
                 guard pids.count > 1 else { continue }
 
-                for i in 0..<pids.count {
-                    for j in (i + 1)..<pids.count {
-                        guard let from = cardPositions[pids[i]],
-                              let to = cardPositions[pids[j]] else { continue }
+                // O(n) chain: connect adjacent members
+                for i in 0..<(pids.count - 1) {
+                    guard let from = cardPositions[pids[i]],
+                          let to = cardPositions[pids[i + 1]] else { continue }
 
-                        let fromPt = canvasPoint(from)
-                        let toPt = canvasPoint(to)
+                    let fromPt = canvasPoint(from)
+                    let toPt = canvasPoint(to)
 
-                        // Curved energy line
-                        let midX = (fromPt.x + toPt.x) / 2
-                        let midY = (fromPt.y + toPt.y) / 2
-                        let offset = sin(energyPhase * 0.03 + Double(i + j)) * 15
+                    // Curved energy line
+                    let midX = (fromPt.x + toPt.x) / 2
+                    let midY = (fromPt.y + toPt.y) / 2
+                    let offset = sin(energyPhase * 0.03 + Double(i)) * 15
 
-                        var path = Path()
-                        path.move(to: fromPt)
-                        path.addQuadCurve(
-                            to: toPt,
-                            control: CGPoint(x: midX + CGFloat(offset), y: midY - 20 + CGFloat(offset))
-                        )
+                    var path = Path()
+                    path.move(to: fromPt)
+                    path.addQuadCurve(
+                        to: toPt,
+                        control: CGPoint(x: midX + CGFloat(offset), y: midY - 20 + CGFloat(offset))
+                    )
 
-                        // Draw glow layer
-                        context.stroke(
-                            path,
-                            with: .color(group.color.opacity(0.06)),
-                            lineWidth: 4
-                        )
-                        // Draw main line
-                        context.stroke(
-                            path,
-                            with: .color(group.color.opacity(0.15)),
-                            lineWidth: 1.5
-                        )
+                    // Draw glow layer
+                    context.stroke(
+                        path,
+                        with: .color(group.color.opacity(0.06)),
+                        lineWidth: 4
+                    )
+                    // Draw main line
+                    context.stroke(
+                        path,
+                        with: .color(group.color.opacity(0.15)),
+                        lineWidth: 1.5
+                    )
 
-                        // Energy particle along the path
-                        let t = (sin(energyPhase * 0.04 + Double(i)) + 1) / 2
-                        let px = fromPt.x + (toPt.x - fromPt.x) * t
-                        let py = fromPt.y + (toPt.y - fromPt.y) * t + CGFloat(offset) * (1 - abs(2 * t - 1))
-                        let particleRect = CGRect(x: px - 3, y: py - 3, width: 6, height: 6)
-                        context.fill(Path(ellipseIn: particleRect), with: .color(group.color.opacity(0.6)))
-                        let glowRect = CGRect(x: px - 6, y: py - 6, width: 12, height: 12)
-                        context.fill(Path(ellipseIn: glowRect), with: .color(group.color.opacity(0.15)))
-                    }
+                    // Energy particle along the path
+                    let t = (sin(energyPhase * 0.04 + Double(i)) + 1) / 2
+                    let px = fromPt.x + (toPt.x - fromPt.x) * t
+                    let py = fromPt.y + (toPt.y - fromPt.y) * t + CGFloat(offset) * (1 - abs(2 * t - 1))
+                    let particleRect = CGRect(x: px - 3, y: py - 3, width: 6, height: 6)
+                    context.fill(Path(ellipseIn: particleRect), with: .color(group.color.opacity(0.6)))
+                    let glowRect = CGRect(x: px - 6, y: py - 6, width: 12, height: 12)
+                    context.fill(Path(ellipseIn: glowRect), with: .color(group.color.opacity(0.15)))
                 }
             }
         }
@@ -993,7 +988,7 @@ struct CanvasWorkspaceView: View {
                         .fill(.white.opacity(0.06))
                         .overlay(RoundedRectangle(cornerRadius: 8).stroke(group.color.opacity(0.2), lineWidth: 1))
                 )
-                .onChange(of: editingGroupName) { newName in
+                .onChange(of: editingGroupName) { _, newName in
                     if let idx = groups.firstIndex(where: { $0.id == group.id }) {
                         groups[idx].name = newName
                     }
@@ -1243,7 +1238,7 @@ struct CanvasWorkspaceView: View {
 
                     VStack(alignment: .leading, spacing: 2) {
                         Text(session.projectName).font(.headline).foregroundStyle(.white)
-                        Text(session.activity.label).font(.caption).foregroundStyle(activityColor(session.activity))
+                        Text(session.activity.label).font(.caption).foregroundStyle(session.activity.color)
                     }
                     Spacer()
                     Button {
@@ -1266,7 +1261,7 @@ struct CanvasWorkspaceView: View {
                         }
                         .padding(.vertical, 8)
                     }
-                    .onChange(of: conversationLoader.messages.count) { _ in
+                    .onChange(of: conversationLoader.messages.count) { _, _ in
                         if let last = conversationLoader.messages.last {
                             withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo(last.id, anchor: .bottom) }
                         }
@@ -1698,7 +1693,7 @@ struct CanvasWorkspaceView: View {
                     groups[j].memberPIDs.remove(pid)
                 }
                 withAnimation(.spring(response: 0.3)) {
-                    groups[i].memberPIDs.insert(pid)
+                    _ = groups[i].memberPIDs.insert(pid)
                 }
                 // Clean up empty groups
                 groups.removeAll { $0.memberPIDs.isEmpty }
@@ -1747,10 +1742,6 @@ struct CanvasWorkspaceView: View {
             center: CGPoint(x: (minX + maxX) / 2, y: (minY + maxY) / 2),
             size: CGSize(width: maxX - minX, height: maxY - minY)
         )
-    }
-
-    private func activityColor(_ activity: ClaudeActivity) -> Color {
-        activity.color
     }
 
     private func styleIcon(_ style: CanvasGroup.GroupStyle) -> String {

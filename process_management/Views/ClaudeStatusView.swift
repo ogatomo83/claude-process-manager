@@ -86,7 +86,7 @@ struct ClaudeStatusView: View {
         }
         .frame(width: 120, height: 120)
         .onAppear { startAnimations() }
-        .onChange(of: activity) { _ in startAnimations() }
+        .onChange(of: activity) { _, _ in startAnimations() }
     }
 
     // MARK: - Components

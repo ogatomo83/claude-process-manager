@@ -1,5 +1,6 @@
 import Foundation
 import Combine
+import CoreGraphics
 
 struct ProjectEntry: Identifiable {
     let id: String  // full path
@@ -72,13 +73,15 @@ final class ProjectLauncher: ObservableObject {
     }
 
     private func activateAndLaunchClaude(projectName: String, path: String) {
+        let escaped = projectName.replacingOccurrences(of: "\\", with: "\\\\")
+                                  .replacingOccurrences(of: "\"", with: "\\\"")
         let script = """
         tell application "System Events"
             set processNames to {"Electron", "Code", "Visual Studio Code"}
             repeat with procName in processNames
                 if exists process procName then
                     tell process procName
-                        set targetWindows to every window whose name contains "\(projectName)"
+                        set targetWindows to every window whose name contains "\(escaped)"
                         if (count of targetWindows) > 0 then
                             set targetWindow to item 1 of targetWindows
                             perform action "AXRaise" of targetWindow
@@ -106,62 +109,50 @@ final class ProjectLauncher: ObservableObject {
         let openProcess = Process()
         openProcess.executableURL = URL(fileURLWithPath: "/usr/bin/open")
         openProcess.arguments = ["-a", "Visual Studio Code", path]
+        openProcess.currentDirectoryURL = URL(fileURLWithPath: NSHomeDirectory())
         try? openProcess.run()
         openProcess.waitUntilExit()
 
-        // Wait for VSCode to open
-        Thread.sleep(forTimeInterval: 2.0)
-
-        // Open terminal and type claude
-        let script = """
-        tell application "System Events"
-            set processNames to {"Electron", "Code", "Visual Studio Code"}
-            repeat with procName in processNames
-                if exists process procName then
-                    tell process procName
-                        set frontmost to true
-                        delay 0.5
-                        -- Open terminal: Ctrl+`
-                        keystroke "`" using {control down}
-                        delay 0.8
-                        keystroke "claude"
-                        delay 0.1
-                        key code 36
-                        return
-                    end tell
-                end if
-            end repeat
-        end tell
-        """
-        runAppleScript(script)
+        // Wait for VSCode to open, then type claude
+        DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 2.0) {
+            let script = """
+            tell application "System Events"
+                set processNames to {"Electron", "Code", "Visual Studio Code"}
+                repeat with procName in processNames
+                    if exists process procName then
+                        tell process procName
+                            set frontmost to true
+                            delay 0.5
+                            -- Open terminal: Ctrl+`
+                            keystroke "`" using {control down}
+                            delay 0.8
+                            keystroke "claude"
+                            delay 0.1
+                            key code 36
+                            return
+                        end tell
+                    end if
+                end repeat
+            end tell
+            """
+            self.runAppleScript(script)
+        }
     }
 
     private func getOpenVSCodeProjects() -> [String] {
-        let script = """
-        tell application "System Events"
-            set windowTitles to {}
-            set processNames to {"Electron", "Code", "Visual Studio Code"}
-            repeat with procName in processNames
-                if exists process procName then
-                    tell process procName
-                        set windowTitles to name of every window
-                    end tell
-                    exit repeat
-                end if
-            end repeat
-            return windowTitles
-        end tell
-        """
-        let appleScript = NSAppleScript(source: script)
-        var error: NSDictionary?
-        let result = appleScript?.executeAndReturnError(&error)
+        guard let windowList = CGWindowListCopyWindowInfo(
+            [.optionAll, .excludeDesktopElements], kCGNullWindowID
+        ) as? [[String: Any]] else { return [] }
 
-        guard let listDesc = result else { return [] }
+        let vscodeOwners: Set<String> = ["Electron", "Code", "Visual Studio Code"]
         var titles: [String] = []
-        for i in 1...listDesc.numberOfItems {
-            if let item = listDesc.atIndex(i)?.stringValue {
-                titles.append(item)
-            }
+
+        for window in windowList {
+            guard let owner = window[kCGWindowOwnerName as String] as? String,
+                  vscodeOwners.contains(owner),
+                  let name = window[kCGWindowName as String] as? String,
+                  !name.isEmpty else { continue }
+            titles.append(name)
         }
         return titles
     }

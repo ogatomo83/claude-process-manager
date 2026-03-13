@@ -95,7 +95,7 @@ struct SessionCardView: View {
             withAnimation(.spring(response: 0.6, dampingFraction: 0.7)) { appear = true }
             startAnimations()
         }
-        .onChange(of: activity) { _ in startAnimations() }
+        .onChange(of: activity) { _, _ in startAnimations() }
     }
 
     // MARK: - Activity Banner
