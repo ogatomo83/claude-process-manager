@@ -26,10 +26,13 @@ final class ConversationLoader: ObservableObject {
             let parsed = self.loadTail(path: jsonlPath, maxMessages: 50)
 
             let detectedActivity = self.detectActivity(path: jsonlPath)
+            ActivityLogger.shared.logInitial(event: "load(\(jsonlPath.suffix(12)))", result: detectedActivity)
 
             DispatchQueue.main.async {
+                let prev = self.activity
                 self.messages = parsed
                 self.activity = detectedActivity
+                ActivityLogger.shared.logTransition(source: "ConversationLoader.init", from: prev, to: detectedActivity)
             }
 
             self.startWatching(path: jsonlPath)
@@ -140,7 +143,9 @@ final class ConversationLoader: ObservableObject {
                 self.messages.append(contentsOf: newMessages)
             }
             if let activity = latestActivity {
+                let prev = self.activity
                 self.activity = activity
+                ActivityLogger.shared.logTransition(source: "ConversationLoader.stream", from: prev, to: activity)
             }
         }
     }
@@ -238,7 +243,9 @@ final class ConversationLoader: ObservableObject {
 
     // MARK: - Activity Detection
 
-    /// Read the last few lines of the JSONL to determine current activity
+    /// Read the last few lines of the JSONL to determine current activity.
+    /// Only `system::turn_duration` is treated as a definitive idle signal.
+    /// When turn_duration follows assistant with tool_use → waitingPermission.
     private func detectActivity(path: String) -> ClaudeActivity {
         guard let fh = FileHandle(forReadingAtPath: path) else { return .idle }
         defer { fh.closeFile() }
@@ -246,29 +253,22 @@ final class ConversationLoader: ObservableObject {
         let fileSize = fh.seekToEndOfFile()
         guard fileSize > 0 else { return .idle }
 
-        // Check file modification time for staleness
         let fileURL = URL(fileURLWithPath: path)
         let modDate = (try? FileManager.default.attributesOfItem(atPath: fileURL.path)[.modificationDate] as? Date) ?? Date.distantPast
         let secondsSinceModified = Date().timeIntervalSince(modDate)
-        let isStale = secondsSinceModified > 5
 
-        let chunkSize: UInt64 = min(fileSize, 4096)
+        let chunkSize: UInt64 = min(fileSize, 8192)
         fh.seek(toFileOffset: fileSize - chunkSize)
         let data = fh.readDataToEndOfFile()
         guard let content = String(data: data, encoding: .utf8) else { return .idle }
 
         let lines = content.split(separator: "\n", omittingEmptySubsequences: true)
+        let isStaleForIdle = secondsSinceModified > 10
 
-        // Check if there are progress entries (= tool is actively producing output)
-        let hasProgress = lines.contains { $0.contains("\"progress\"") }
+        var sawTurnDuration = false
 
         for line in lines.reversed() {
             let s = String(line)
-
-            // Quick check for compact_boundary
-            if s.contains("\"compact_boundary\"") {
-                return isStale ? .idle : .compacting
-            }
 
             guard let jsonData = s.data(using: .utf8),
                   let json = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] else { continue }
@@ -276,40 +276,46 @@ final class ConversationLoader: ObservableObject {
             let type = json["type"] as? String ?? ""
 
             switch type {
+            case "file-history-snapshot":
+                continue
+
+            case "progress":
+                return .toolRunning
+
             case "system":
                 let subtype = json["subtype"] as? String ?? ""
+                if subtype == "turn_duration" {
+                    sawTurnDuration = true
+                    continue
+                }
                 if subtype == "compact_boundary" {
-                    return isStale ? .idle : .compacting
+                    return secondsSinceModified > 30 ? .idle : .compacting
                 }
                 continue
 
             case "user":
-                // Check if this is a tool_result (intermediate state)
-                if let message = json["message"] as? [String: Any] {
-                    if let contentArray = message["content"] as? [[String: Any]] {
-                        let isToolResult = contentArray.contains { ($0["type"] as? String) == "tool_result" }
-                        if isToolResult { continue }
-                    }
+                if let message = json["message"] as? [String: Any],
+                   let contentArray = message["content"] as? [[String: Any]] {
+                    let isToolResult = contentArray.contains { ($0["type"] as? String) == "tool_result" }
+                    if isToolResult { continue }
                 }
-                return isStale ? .idle : .thinking
+                return sawTurnDuration ? .idle : .thinking
 
             case "assistant":
                 guard let message = json["message"] as? [String: Any],
                       let contentArray = message["content"] as? [[String: Any]] else {
-                    return isStale ? .idle : .responding
+                    return (sawTurnDuration || isStaleForIdle) ? .idle : .responding
                 }
-                for block in contentArray {
-                    let blockType = block["type"] as? String ?? ""
-                    if blockType == "tool_use" {
-                        if hasProgress && !isStale { return .toolRunning }
-                        if !isStale { return .waitingPermission }
-                        return .idle
-                    }
-                    if blockType == "text" {
-                        return isStale ? .idle : .responding
-                    }
+                let blockTypes = contentArray.compactMap { $0["type"] as? String }
+
+                if blockTypes.contains("thinking") && !blockTypes.contains("text") && !blockTypes.contains("tool_use") {
+                    return sawTurnDuration ? .idle : .thinking
                 }
-                return isStale ? .idle : .responding
+                if blockTypes.contains("tool_use") {
+                    return sawTurnDuration ? .idle : .waitingPermission
+                }
+                // assistant(text) + stale → idle
+                return (sawTurnDuration || isStaleForIdle) ? .idle : .responding
 
             default:
                 continue
@@ -322,10 +328,12 @@ final class ConversationLoader: ObservableObject {
     private func detectActivityFromLine(_ line: String) -> ClaudeActivity? {
         // Quick string checks before JSON parsing
         if line.contains("\"progress\"") {
+            ActivityLogger.shared.logStream(event: "progress(string-match)", result: .toolRunning)
             return .toolRunning
         }
 
         if line.contains("\"compact_boundary\"") {
+            ActivityLogger.shared.logStream(event: "compact_boundary(string-match)", result: .compacting)
             return .compacting
         }
 
@@ -339,29 +347,54 @@ final class ConversationLoader: ObservableObject {
         switch type {
         case "system":
             let subtype = json["subtype"] as? String ?? ""
-            if subtype == "compact_boundary" { return .compacting }
+            if subtype == "compact_boundary" {
+                ActivityLogger.shared.logStream(event: "system::compact_boundary", result: .compacting)
+                return .compacting
+            }
+            if subtype == "turn_duration" {
+                ActivityLogger.shared.logStream(event: "system::turn_duration", result: .idle)
+                return .idle
+            }
             return nil
 
         case "user":
-            // Check if this is a tool_result
             if let message = json["message"] as? [String: Any],
                let contentArray = message["content"] as? [[String: Any]] {
                 let isToolResult = contentArray.contains { ($0["type"] as? String) == "tool_result" }
-                if isToolResult { return .toolRunning }
+                if isToolResult {
+                    // tool_resultはツール完了 → 次のAPIレスポンス待ち
+                    ActivityLogger.shared.logStream(event: "user(tool_result)", result: .thinking)
+                    return .thinking
+                }
             }
+            ActivityLogger.shared.logStream(event: "user(text)", result: .thinking)
             return .thinking
 
         case "assistant":
             guard let message = json["message"] as? [String: Any],
-                  let contentArray = message["content"] as? [[String: Any]] else { return .responding }
+                  let contentArray = message["content"] as? [[String: Any]] else {
+                ActivityLogger.shared.logStream(event: "assistant(no-content)", result: .responding)
+                return .responding
+            }
+            let blockTypes = contentArray.compactMap { $0["type"] as? String }
+            let blockDesc = blockTypes.joined(separator: ",")
             for block in contentArray {
                 let blockType = block["type"] as? String ?? ""
-                if blockType == "tool_use" { return .waitingPermission }
-                if blockType == "text" { return .responding }
+                if blockType == "tool_use" {
+                    let toolName = block["name"] as? String ?? "?"
+                    ActivityLogger.shared.logStream(event: "assistant(tool_use:\(toolName)) blocks=[\(blockDesc)]", result: .waitingPermission)
+                    return .waitingPermission
+                }
+                if blockType == "text" {
+                    ActivityLogger.shared.logStream(event: "assistant(text) blocks=[\(blockDesc)]", result: .responding)
+                    return .responding
+                }
             }
+            ActivityLogger.shared.logStream(event: "assistant(\(blockDesc))", result: .responding)
             return .responding
 
         case "progress":
+            ActivityLogger.shared.logStream(event: "progress(type-match)", result: .toolRunning)
             return .toolRunning
 
         default:

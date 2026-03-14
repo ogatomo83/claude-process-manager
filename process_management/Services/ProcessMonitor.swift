@@ -10,6 +10,11 @@ final class ProcessMonitor: ObservableObject {
     private var timer: Timer?
     private let sessionResolver = SessionResolver()
     private var previousActivities: [Int32: ClaudeActivity] = [:]
+    /// idle遷移のデバウンス: 2回連続idleで初めてidle確定
+    private var idleCountByPid: [Int32: Int] = [:]
+    /// ファイル更新時刻キャッシュ: 変化なしならJSONL再読みスキップ
+    private var cachedModDates: [Int32: Date] = [:]
+    private var cachedActivities: [Int32: ClaudeActivity] = [:]
 
     func start() {
         refresh()
@@ -55,13 +60,34 @@ final class ProcessMonitor: ObservableObject {
                 // Detect idle transitions and send notifications
                 for session in newSessions {
                     let previous = self.previousActivities[session.id]
-                    if let previous, previous != .idle, session.activity == .idle {
-                        NotificationService.shared.notifyTurnCompleted(sessionName: session.projectName)
+
+                    // idle遷移のデバウンス: 2回連続idleで初めて確定
+                    if session.activity == .idle {
+                        self.idleCountByPid[session.id, default: 0] += 1
+                    } else {
+                        self.idleCountByPid[session.id] = 0
+                    }
+
+                    if let previous {
+                        // デバウンス: 初回idleは遷移をスキップ（previousを維持）
+                        let effectiveActivity: ClaudeActivity
+                        if session.activity == .idle, previous != .idle,
+                           (self.idleCountByPid[session.id] ?? 0) < 2 {
+                            effectiveActivity = previous
+                            ActivityLogger.shared.logPoll(pid: session.id, project: session.projectName, event: "idle-debounce(count=\(self.idleCountByPid[session.id] ?? 0))", result: previous)
+                        } else {
+                            effectiveActivity = session.activity
+                        }
+
+                        ActivityLogger.shared.logTransition(source: "ProcessMonitor(\(session.projectName))", from: previous, to: effectiveActivity)
+                        if previous != .idle, effectiveActivity == .idle {
+                            NotificationService.shared.notifyTurnCompleted(sessionName: session.projectName)
+                        }
+                        self.previousActivities[session.id] = effectiveActivity
+                    } else {
+                        self.previousActivities[session.id] = session.activity
                     }
                 }
-                self.previousActivities = Dictionary(
-                    uniqueKeysWithValues: newSessions.map { ($0.id, $0.activity) }
-                )
 
                 self.sessions = newSessions
                 self.vscodeWindows = newVSCodeWindows
@@ -94,7 +120,25 @@ final class ProcessMonitor: ObservableObject {
         let hostApp = detectHostApp(pid: pid)
         let status = determineStatus(cpu: cpuPercent, elapsed: elapsed)
         let jsonlPath = sessionResolver.resolveJSONLPath(cwd: cwd)
-        let activity = detectActivity(jsonlPath: jsonlPath, cpuPercent: cpuPercent)
+
+        // ファイル更新時刻が変わっていなければキャッシュを返す
+        // ただし idle 以外はstale判定が必要なので再チェック
+        let activity: ClaudeActivity
+        if let path = jsonlPath,
+           let modDate = try? FileManager.default.attributesOfItem(atPath: path)[.modificationDate] as? Date,
+           let cachedMod = cachedModDates[pid],
+           cachedMod == modDate,
+           let cached = cachedActivities[pid],
+           cached == .idle {
+            activity = cached
+        } else {
+            activity = detectActivity(jsonlPath: jsonlPath, cpuPercent: cpuPercent)
+            if let path = jsonlPath,
+               let modDate = try? FileManager.default.attributesOfItem(atPath: path)[.modificationDate] as? Date {
+                cachedModDates[pid] = modDate
+            }
+            cachedActivities[pid] = activity
+        }
 
         return ClaudeSession(
             id: pid,
@@ -157,11 +201,10 @@ final class ProcessMonitor: ObservableObject {
         return false
     }
 
-    /// Lightweight activity detection: read last 64KB of JSONL
-    /// Idle detection: turn_duration (definitive), or file-history-snapshot
-    /// after assistant text (turn_duration is not always written).
-    /// During extended thinking ("Ruminating..."), no JSONL writes and low CPU
-    /// (thinking happens server-side), so staleness/CPU heuristics don't work.
+    /// Lightweight activity detection: read last 64KB of JSONL.
+    /// Only `system::turn_duration` is treated as a definitive idle signal.
+    /// When turn_duration follows an assistant with tool_use, the session is
+    /// waiting for user approval, not idle.
     private func detectActivity(jsonlPath: String?, cpuPercent: Double) -> ClaudeActivity {
         guard let path = jsonlPath,
               let fh = FileHandle(forReadingAtPath: path) else { return .idle }
@@ -180,10 +223,16 @@ final class ProcessMonitor: ObservableObject {
         guard let content = String(data: data, encoding: .utf8) else { return .idle }
 
         let lines = content.split(separator: "\n", omittingEmptySubsequences: true)
+        let project = (path as NSString).lastPathComponent.prefix(8)
 
-        // Track whether file-history-snapshot was seen before hitting assistant/user
-        // If assistant text is followed by file-history-snapshot → turn is complete
-        var sawFileHistorySnapshot = false
+        // stale判定: ファイルが一定時間更新されていない場合の扱い
+        // - assistant(text) + stale → idle（ターン完了、turn_durationなし）
+        // - user(text) + stale → thinking（API応答待ち、時間がかかることがある）
+        // - progress/tool_use + stale → waitingPermission（ユーザー承認待ち）
+        // - assistant(thinking) + stale → thinking（思考に時間がかかる）
+        let isStaleForIdle = secondsSinceModified > 10
+
+        var sawTurnDuration = false
 
         for line in lines.reversed() {
             let s = String(line)
@@ -195,47 +244,68 @@ final class ProcessMonitor: ObservableObject {
 
             switch type {
             case "file-history-snapshot":
-                sawFileHistorySnapshot = true
                 continue
 
-            // progress events = tool is actively producing output
             case "progress":
-                return secondsSinceModified > 5 ? .idle : .toolRunning
+                // progressがある = ツールは承認済み・実行中
+                // サブエージェント等はprogressが断続的（10-15秒間隔）なのでstaleでもtoolRunning
+                ActivityLogger.shared.logPoll(pid: 0, project: String(project), event: "progress", result: .toolRunning)
+                return .toolRunning
 
             case "system":
                 let subtype = json["subtype"] as? String ?? ""
                 if subtype == "turn_duration" {
-                    return .idle
+                    sawTurnDuration = true
+                    continue
                 }
                 if subtype == "compact_boundary" {
-                    return secondsSinceModified > 10 ? .idle : .compacting
+                    let r: ClaudeActivity = secondsSinceModified > 30 ? .idle : .compacting
+                    ActivityLogger.shared.logPoll(pid: 0, project: String(project), event: "compact_boundary(\(Int(secondsSinceModified))s)", result: r)
+                    return r
                 }
                 continue
 
             case "user":
-                return .thinking
+                if let message = json["message"] as? [String: Any],
+                   let contentArray = message["content"] as? [[String: Any]] {
+                    let isToolResult = contentArray.contains { ($0["type"] as? String) == "tool_result" }
+                    if isToolResult { continue }
+                }
+                // user(text) + stale → まだthinking（APIは10秒以上かかることがある）
+                let r: ClaudeActivity = sawTurnDuration ? .idle : .thinking
+                ActivityLogger.shared.logPoll(pid: 0, project: String(project), event: "user(text) sawTD=\(sawTurnDuration)", result: r)
+                return r
 
             case "assistant":
                 guard let msg = json["message"] as? [String: Any],
                       let blocks = msg["content"] as? [[String: Any]] else {
-                    return secondsSinceModified > 5 ? .idle : .responding
+                    let r: ClaudeActivity = (sawTurnDuration || isStaleForIdle) ? .idle : .responding
+                    ActivityLogger.shared.logPoll(pid: 0, project: String(project), event: "assistant(no-content) sawTD=\(sawTurnDuration) stale=\(isStaleForIdle)", result: r)
+                    return r
                 }
                 let blockTypes = blocks.compactMap { $0["type"] as? String }
+                let blockDesc = blockTypes.joined(separator: ",")
 
-                // Extended thinking block (no text/tool_use yet)
+                // thinking only → thinking（staleでもthinking維持）
                 if blockTypes.contains("thinking") && !blockTypes.contains("text") && !blockTypes.contains("tool_use") {
-                    return .thinking
+                    let r: ClaudeActivity = sawTurnDuration ? .idle : .thinking
+                    ActivityLogger.shared.logPoll(pid: 0, project: String(project), event: "assistant(\(blockDesc)) sawTD=\(sawTurnDuration)", result: r)
+                    return r
                 }
-                // tool_use without subsequent progress/tool_result → awaiting approval
+                // tool_use → staleならwaitingPermission（承認待ち）
                 if blockTypes.contains("tool_use") {
+                    if sawTurnDuration {
+                        ActivityLogger.shared.logPoll(pid: 0, project: String(project), event: "assistant(tool_use) sawTD=true", result: .idle)
+                        return .idle
+                    }
+                    let toolName = blocks.first(where: { $0["type"] as? String == "tool_use" })?["name"] as? String ?? "?"
+                    ActivityLogger.shared.logPoll(pid: 0, project: String(project), event: "assistant(tool_use:\(toolName))", result: .waitingPermission)
                     return .waitingPermission
                 }
-                // Text response followed by file-history-snapshot → turn complete
-                if sawFileHistorySnapshot {
-                    return .idle
-                }
-                // Still streaming — fall back to staleness check
-                return secondsSinceModified > 5 ? .idle : .responding
+                // assistant(text) + stale → idle（ターン完了、turn_durationなし）
+                let r: ClaudeActivity = (sawTurnDuration || isStaleForIdle) ? .idle : .responding
+                ActivityLogger.shared.logPoll(pid: 0, project: String(project), event: "assistant(\(blockDesc)) sawTD=\(sawTurnDuration) stale=\(isStaleForIdle)", result: r)
+                return r
 
             default:
                 continue
