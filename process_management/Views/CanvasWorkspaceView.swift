@@ -2,7 +2,6 @@ import SwiftUI
 
 struct CanvasWorkspaceView: View {
     @ObservedObject var monitor: ProcessMonitor
-    @ObservedObject var conversationLoader: ConversationLoader
     let windowSwitcher: WindowSwitcher
 
     @StateObject private var launcher = ProjectLauncher()
@@ -13,7 +12,6 @@ struct CanvasWorkspaceView: View {
     @State private var baseScale: CGFloat = 1.0
     @State private var cardPositions: [Int32: CGPoint] = [:]
     @State private var selectedPID: Int32? = nil
-    @State private var showDetail: Bool = false
     @State private var hoveredPID: Int32? = nil
     @State private var showProjectList: Bool = false
 
@@ -68,13 +66,6 @@ struct CanvasWorkspaceView: View {
                 Spacer()
             }
 
-            // Detail panel
-            if showDetail, let pid = selectedPID,
-               let session = monitor.sessions.first(where: { $0.id == pid }) {
-                detailPanel(session: session)
-                    .transition(.move(edge: .trailing).combined(with: .opacity))
-            }
-
             // Group editor
             if let editID = editingGroupID,
                let idx = groups.firstIndex(where: { $0.id == editID }) {
@@ -112,7 +103,6 @@ struct CanvasWorkspaceView: View {
         }
         .onDisappear {
             monitor.stop()
-            conversationLoader.stop()
             energyTimer?.invalidate()
             energyTimer = nil
             if let monitor = scrollMonitor {
@@ -255,18 +245,11 @@ struct CanvasWorkspaceView: View {
         }
         .onTapGesture(count: 2) {
             windowSwitcher.activate(session: session)
+            GlobalHotkeyService.shared.toggleWindow()
         }
         .onTapGesture(count: 1) {
             withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
-                if selectedPID == session.id {
-                    showDetail.toggle()
-                } else {
-                    selectedPID = session.id
-                    showDetail = true
-                    if let path = session.jsonlPath {
-                        conversationLoader.load(jsonlPath: path)
-                    }
-                }
+                selectedPID = selectedPID == session.id ? nil : session.id
             }
         }
         .gesture(makeCardDragGesture(pid: session.id))
@@ -343,15 +326,11 @@ struct CanvasWorkspaceView: View {
         }
         .onTapGesture(count: 2) {
             windowSwitcher.activateVSCodeWindow(projectName: window.projectName)
+            GlobalHotkeyService.shared.toggleWindow()
         }
         .onTapGesture(count: 1) {
             withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
-                if selectedPID == window.id {
-                    selectedPID = nil
-                } else {
-                    selectedPID = window.id
-                    showDetail = false
-                }
+                selectedPID = selectedPID == window.id ? nil : window.id
             }
         }
         .gesture(makeCardDragGesture(pid: window.id))
@@ -1226,59 +1205,6 @@ struct CanvasWorkspaceView: View {
         .buttonStyle(.plain)
     }
 
-    // MARK: - Detail Panel
-
-    private func detailPanel(session: ClaudeSession) -> some View {
-        HStack(spacing: 0) {
-            Spacer()
-            VStack(spacing: 0) {
-                HStack {
-                    ClaudeStatusView(activity: session.activity, cpuPercent: session.cpuPercent)
-                        .frame(width: 50, height: 50)
-
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(session.projectName).font(.headline).foregroundStyle(.white)
-                        Text(session.activity.label).font(.caption).foregroundStyle(session.activity.color)
-                    }
-                    Spacer()
-                    Button {
-                        withAnimation(.spring(response: 0.3)) { showDetail = false }
-                    } label: {
-                        Image(systemName: "xmark.circle.fill").font(.title2).foregroundStyle(.white.opacity(0.4))
-                    }
-                    .buttonStyle(.plain)
-                }
-                .padding()
-
-                Divider().overlay(Color.white.opacity(0.1))
-
-                ScrollViewReader { proxy in
-                    ScrollView {
-                        LazyVStack(spacing: 4) {
-                            ForEach(conversationLoader.messages) { message in
-                                MessageBubbleView(message: message).id(message.id)
-                            }
-                        }
-                        .padding(.vertical, 8)
-                    }
-                    .onChange(of: conversationLoader.messages.count) { _, _ in
-                        if let last = conversationLoader.messages.last {
-                            withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo(last.id, anchor: .bottom) }
-                        }
-                    }
-                }
-            }
-            .frame(width: 380)
-            .background(
-                RoundedRectangle(cornerRadius: 16).fill(.ultraThinMaterial)
-                    .overlay(RoundedRectangle(cornerRadius: 16).stroke(Color.white.opacity(0.1), lineWidth: 1))
-            )
-            .clipShape(RoundedRectangle(cornerRadius: 16))
-            .shadow(color: .black.opacity(0.4), radius: 20, x: -5, y: 0)
-            .padding(12)
-        }
-    }
-
     // MARK: - Floating Toolbar
 
     private var floatingToolbar: some View {
@@ -1303,7 +1229,6 @@ struct CanvasWorkspaceView: View {
                     if !showAllHostApps, let pid = selectedPID,
                        !visibleSessions.contains(where: { $0.id == pid }) {
                         selectedPID = nil
-                        showDetail = false
                     }
                 }
             } label: {
