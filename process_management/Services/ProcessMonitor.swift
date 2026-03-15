@@ -269,7 +269,13 @@ final class ProcessMonitor: ObservableObject {
                 if let message = json["message"] as? [String: Any],
                    let contentArray = message["content"] as? [[String: Any]] {
                     let isToolResult = contentArray.contains { ($0["type"] as? String) == "tool_result" }
-                    if isToolResult { continue }
+                    if isToolResult {
+                        // tool_result = ツール実行済み → Claudeが次のレスポンスを考え始める
+                        // API呼び出しに10秒以上かかることがあるのでstaleでもthinking
+                        let r: ClaudeActivity = sawTurnDuration ? .idle : .thinking
+                        ActivityLogger.shared.logPoll(pid: 0, project: String(project), event: "user(tool_result) sawTD=\(sawTurnDuration)", result: r)
+                        return r
+                    }
                 }
                 // user(text) + stale → まだthinking（APIは10秒以上かかることがある）
                 let r: ClaudeActivity = sawTurnDuration ? .idle : .thinking
@@ -292,7 +298,8 @@ final class ProcessMonitor: ObservableObject {
                     ActivityLogger.shared.logPoll(pid: 0, project: String(project), event: "assistant(\(blockDesc)) sawTD=\(sawTurnDuration)", result: r)
                     return r
                 }
-                // tool_use → staleならwaitingPermission（承認待ち）
+                // tool_use → waitingPermission（承認待ち）
+                // tool_resultが後にあるケースはuser(tool_result)で先にthinkingを返すため到達しない
                 if blockTypes.contains("tool_use") {
                     if sawTurnDuration {
                         ActivityLogger.shared.logPoll(pid: 0, project: String(project), event: "assistant(tool_use) sawTD=true", result: .idle)

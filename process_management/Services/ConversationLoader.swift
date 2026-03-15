@@ -297,7 +297,10 @@ final class ConversationLoader: ObservableObject {
                 if let message = json["message"] as? [String: Any],
                    let contentArray = message["content"] as? [[String: Any]] {
                     let isToolResult = contentArray.contains { ($0["type"] as? String) == "tool_result" }
-                    if isToolResult { continue }
+                    if isToolResult {
+                        // tool_result = ツール実行済み → Claudeが次のレスポンスを考え始める
+                        return sawTurnDuration ? .idle : .thinking
+                    }
                 }
                 return sawTurnDuration ? .idle : .thinking
 

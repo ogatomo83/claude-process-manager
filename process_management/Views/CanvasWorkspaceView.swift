@@ -43,6 +43,10 @@ struct CanvasWorkspaceView: View {
     @State private var energyPhase: Double = 0
     @State private var energyTimer: Timer?
 
+    // Vimmer mode
+    @AppStorage("vimmerMode") private var vimmerMode: Bool = false
+    @FocusState private var isCanvasFocused: Bool
+
     private var visibleSessions: [ClaudeSession] {
         if showAllHostApps {
             return monitor.sessions
@@ -93,6 +97,22 @@ struct CanvasWorkspaceView: View {
                     .onChange(of: geo.size) { _, newSize in viewSize = newSize }
             }
         )
+        .focusable()
+        .focused($isCanvasFocused)
+        .onKeyPress { press in
+            guard vimmerMode else { return .ignored }
+            if press.key == KeyEquivalent("j") {
+                selectNextSession()
+                return .handled
+            } else if press.key == KeyEquivalent("k") {
+                selectPrevSession()
+                return .handled
+            } else if press.key == .return {
+                openSelectedSession()
+                return .handled
+            }
+            return .ignored
+        }
         .onAppear {
             monitor.start()
             startEnergyAnimation()
@@ -100,6 +120,7 @@ struct CanvasWorkspaceView: View {
                 autoLayoutAllCards()
             }
             installScrollMonitor()
+            isCanvasFocused = true
         }
         .onDisappear {
             monitor.stop()
@@ -153,6 +174,47 @@ struct CanvasWorkspaceView: View {
 
             return nil // consume the event
         }
+    }
+
+    // MARK: - Vimmer Mode Selection
+
+    private func selectNextSession() {
+        let sessions = visibleSessions
+        guard !sessions.isEmpty else { return }
+        if let current = selectedPID,
+           let idx = sessions.firstIndex(where: { $0.id == current }) {
+            let next = (idx + 1) % sessions.count
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                selectedPID = sessions[next].id
+            }
+        } else {
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                selectedPID = sessions.first?.id
+            }
+        }
+    }
+
+    private func selectPrevSession() {
+        let sessions = visibleSessions
+        guard !sessions.isEmpty else { return }
+        if let current = selectedPID,
+           let idx = sessions.firstIndex(where: { $0.id == current }) {
+            let prev = (idx - 1 + sessions.count) % sessions.count
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                selectedPID = sessions[prev].id
+            }
+        } else {
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                selectedPID = sessions.last?.id
+            }
+        }
+    }
+
+    private func openSelectedSession() {
+        guard let pid = selectedPID,
+              let session = visibleSessions.first(where: { $0.id == pid }) else { return }
+        windowSwitcher.activate(session: session)
+        GlobalHotkeyService.shared.toggleWindow()
     }
 
     // MARK: - Background
@@ -234,6 +296,7 @@ struct CanvasWorkspaceView: View {
             isSelected: selectedPID == session.id,
             isHovered: hoveredPID == session.id
         )
+        .scaleEffect(canvasScale)
         .position(
             x: pos.x * canvasScale + canvasOffset.width,
             y: pos.y * canvasScale + canvasOffset.height
@@ -315,6 +378,7 @@ struct CanvasWorkspaceView: View {
             isSelected: selectedPID == window.id,
             isHovered: hoveredPID == window.id
         )
+        .scaleEffect(canvasScale)
         .position(
             x: pos.x * canvasScale + canvasOffset.width,
             y: pos.y * canvasScale + canvasOffset.height
@@ -1321,6 +1385,21 @@ struct CanvasWorkspaceView: View {
             }
             .buttonStyle(.plain)
 
+            // Vimmer mode toggle
+            Button {
+                vimmerMode.toggle()
+            } label: {
+                Image(systemName: vimmerMode ? "keyboard.fill" : "keyboard")
+                    .foregroundStyle(vimmerMode ? .green : .white.opacity(0.5))
+                    .padding(6)
+                    .background(
+                        RoundedRectangle(cornerRadius: 6)
+                            .fill(vimmerMode ? .green.opacity(0.12) : .clear)
+                    )
+            }
+            .buttonStyle(.plain)
+            .help("Vimmer Mode (j/k/Enter)")
+
             Divider().frame(height: 16).overlay(Color.white.opacity(0.15))
 
             // Zoom controls
@@ -1512,16 +1591,33 @@ struct CanvasWorkspaceView: View {
 
     // MARK: - Layout
 
+    private var layoutCenter: CGPoint {
+        CGPoint(
+            x: max(viewSize.width, 800) / 2,
+            y: max(viewSize.height, 600) / 2
+        )
+    }
+
+    /// Calculate circle radius so that adjacent cards (width 240 + 40 margin) don't overlap.
+    private func layoutRadius(for count: Int) -> CGFloat {
+        guard count > 1 else { return 0 }
+        let cardSpan: CGFloat = 280 // card width 240 + margin 40
+        let circumference = cardSpan * CGFloat(count)
+        let computed = circumference / (2 * .pi)
+        return max(computed, 200)
+    }
+
     private func autoLayoutNewCards() {
+        let center = layoutCenter
         let totalCount = monitor.sessions.count + (monitor.detectVSCode ? monitor.vscodeWindows.count : 0)
+        let radius = layoutRadius(for: totalCount)
         for (index, session) in monitor.sessions.enumerated() {
             if cardPositions[session.id] == nil {
-                let angle = Double(index) * (2 * .pi / max(Double(totalCount), 1))
-                let radius: CGFloat = 200
+                let angle = Double(index) * (2 * .pi / max(Double(totalCount), 1)) - .pi / 2
                 withAnimation(.spring(response: 0.6, dampingFraction: 0.7)) {
                     cardPositions[session.id] = CGPoint(
-                        x: 400 + radius * CGFloat(cos(angle)),
-                        y: 300 + radius * CGFloat(sin(angle))
+                        x: center.x + radius * CGFloat(cos(angle)),
+                        y: center.y + radius * CGFloat(sin(angle))
                     )
                 }
             }
@@ -1529,12 +1625,11 @@ struct CanvasWorkspaceView: View {
         if monitor.detectVSCode {
             for (index, window) in monitor.vscodeWindows.enumerated() {
                 if cardPositions[window.id] == nil {
-                    let angle = Double(monitor.sessions.count + index) * (2 * .pi / max(Double(totalCount), 1))
-                    let radius: CGFloat = 200
+                    let angle = Double(monitor.sessions.count + index) * (2 * .pi / max(Double(totalCount), 1)) - .pi / 2
                     withAnimation(.spring(response: 0.6, dampingFraction: 0.7)) {
                         cardPositions[window.id] = CGPoint(
-                            x: 400 + radius * CGFloat(cos(angle)),
-                            y: 300 + radius * CGFloat(sin(angle))
+                            x: center.x + radius * CGFloat(cos(angle)),
+                            y: center.y + radius * CGFloat(sin(angle))
                         )
                     }
                 }
@@ -1551,15 +1646,16 @@ struct CanvasWorkspaceView: View {
     }
 
     private func autoLayoutAllCards() {
-        let allIDs = allCardIDs
+        let allIDs = allCardIDs.sorted()
+        let center = layoutCenter
         if groups.isEmpty {
-            // No groups: circular layout
+            // No groups: circular layout (polygon)
+            let radius = layoutRadius(for: allIDs.count)
             for (i, id) in allIDs.enumerated() {
                 let angle = Double(i) * (2 * .pi / max(Double(allIDs.count), 1)) - .pi / 2
-                let radius: CGFloat = allIDs.count == 1 ? 0 : CGFloat(80 + allIDs.count * 40)
                 cardPositions[id] = CGPoint(
-                    x: 400 + radius * CGFloat(cos(angle)),
-                    y: 300 + radius * CGFloat(sin(angle))
+                    x: center.x + radius * CGFloat(cos(angle)),
+                    y: center.y + radius * CGFloat(sin(angle))
                 )
             }
         } else {
@@ -1568,13 +1664,13 @@ struct CanvasWorkspaceView: View {
             let ungroupedIDs = Set(allIDs).subtracting(groups.flatMap { $0.memberPIDs })
 
             for group in groups {
-                let pids = Array(group.memberPIDs)
-                let groupCenterX: CGFloat = 350 + CGFloat(groupIndex) * 400
-                let groupCenterY: CGFloat = 300
+                let pids = Array(group.memberPIDs).sorted()
+                let groupCenterX: CGFloat = center.x - 200 + CGFloat(groupIndex) * 400
+                let groupCenterY: CGFloat = center.y
 
                 for (i, pid) in pids.enumerated() {
                     let angle = Double(i) * (2 * .pi / max(Double(pids.count), 1)) - .pi / 2
-                    let radius: CGFloat = pids.count == 1 ? 0 : CGFloat(60 + pids.count * 30)
+                    let radius = layoutRadius(for: pids.count)
                     cardPositions[pid] = CGPoint(
                         x: groupCenterX + radius * CGFloat(cos(angle)),
                         y: groupCenterY + radius * CGFloat(sin(angle))
@@ -1584,15 +1680,15 @@ struct CanvasWorkspaceView: View {
             }
 
             // Ungrouped cards
-            let ungrouped = Array(ungroupedIDs)
+            let ungrouped = Array(ungroupedIDs).sorted()
             if !ungrouped.isEmpty {
-                let startX: CGFloat = 350 + CGFloat(groupIndex) * 400
+                let startX: CGFloat = center.x - 200 + CGFloat(groupIndex) * 400
                 for (i, pid) in ungrouped.enumerated() {
                     let angle = Double(i) * (2 * .pi / max(Double(ungrouped.count), 1)) - .pi / 2
-                    let radius: CGFloat = ungrouped.count == 1 ? 0 : 80
+                    let radius = layoutRadius(for: ungrouped.count)
                     cardPositions[pid] = CGPoint(
                         x: startX + radius * CGFloat(cos(angle)),
-                        y: 300 + radius * CGFloat(sin(angle))
+                        y: center.y + radius * CGFloat(sin(angle))
                     )
                 }
             }
