@@ -3,6 +3,9 @@ import Foundation
 final class ActivityLogger {
     static let shared = ActivityLogger()
 
+    /// Set to false to disable all file logging
+    var enabled = false
+
     private let logURL: URL
     private let queue = DispatchQueue(label: "activity-logger", qos: .utility)
     private let formatter: DateFormatter = {
@@ -44,6 +47,7 @@ final class ActivityLogger {
     }
 
     private func write(_ message: String) {
+        guard enabled else { return }
         let ts = formatter.string(from: Date())
         let line = "\(ts) \(message)\n"
         queue.async { [logURL] in
