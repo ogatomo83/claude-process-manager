@@ -1,4 +1,12 @@
 import SwiftUI
+import Combine
+
+/// Isolated ObservableObject for energy animation phase.
+/// Only views that observe this will redraw on phase change,
+/// preventing the entire CanvasWorkspaceView body from re-evaluating.
+final class EnergyPhaseModel: ObservableObject {
+    @Published var phase: Double = 0
+}
 
 struct CanvasWorkspaceView: View {
     @ObservedObject var monitor: ProcessMonitor
@@ -39,8 +47,8 @@ struct CanvasWorkspaceView: View {
     @State private var viewSize: CGSize = .zero
     @State private var scrollMonitor: Any? = nil
 
-    // Animation
-    @State private var energyPhase: Double = 0
+    // Animation (isolated to limit redraw scope)
+    @StateObject private var energyModel = EnergyPhaseModel()
     @State private var energyTimer: Timer?
 
     // Vimmer mode
@@ -143,7 +151,12 @@ struct CanvasWorkspaceView: View {
                 applyAutoGrouping()
             }
         }
+        .onChange(of: groups.count) { _, _ in
+            startEnergyAnimation()
+        }
         .onReceive(monitor.$sessions) { _ in
+            // Fix 4: Only evaluate rules when there are groups with rules
+            guard groups.contains(where: { !$0.rules.isEmpty }) else { return }
             evaluateGroupRules()
         }
     }
@@ -557,7 +570,7 @@ struct CanvasWorkspaceView: View {
                         width: w + CGFloat(i) * 40,
                         height: h + CGFloat(i) * 30
                     )
-                    .rotationEffect(.degrees(Double(i) * 15 + energyPhase * (i == 1 ? 0.3 : 0.1)))
+                    .rotationEffect(.degrees(Double(i) * 15 + energyModel.phase * (i == 1 ? 0.3 : 0.1)))
                     .blur(radius: CGFloat(8 + i * 6))
             }
 
@@ -573,6 +586,7 @@ struct CanvasWorkspaceView: View {
             // Group label
             groupLabel(group: group, position: CGPoint(x: center.x, y: center.y - h / 2 + 15))
         }
+        .drawingGroup()
         .position(center)
         .allowsHitTesting(true)
         .onTapGesture(count: 2) {
@@ -635,7 +649,7 @@ struct CanvasWorkspaceView: View {
                     let sy = CGFloat(((seed + i * 31) % Int(size.height)).magnitude)
                     let starSize: CGFloat = CGFloat(1 + (i % 3))
                     let rect = CGRect(x: sx, y: sy, width: starSize, height: starSize)
-                    let brightness = (sin(energyPhase * 0.05 + Double(i)) + 1) / 2
+                    let brightness = (sin(energyModel.phase * 0.05 + Double(i)) + 1) / 2
                     context.fill(Path(ellipseIn: rect), with: .color(group.color.opacity(0.1 + brightness * 0.15)))
                 }
             }
@@ -664,7 +678,7 @@ struct CanvasWorkspaceView: View {
         return ZStack {
             // Aurora waves
             ForEach(0..<4, id: \.self) { i in
-                WaveShape(phase: energyPhase * 0.02 + Double(i) * 0.8, amplitude: 15 + Double(i) * 5)
+                WaveShape(phase: energyModel.phase * 0.02 + Double(i) * 0.8, amplitude: 15 + Double(i) * 5)
                     .stroke(
                         group.color.opacity(0.08 + Double(3 - i) * 0.03),
                         lineWidth: 2
@@ -678,13 +692,14 @@ struct CanvasWorkspaceView: View {
             Ellipse()
                 .fill(group.color.opacity(0.06))
                 .frame(width: w * 0.9, height: h * 0.5)
-                .blur(radius: 20)
+                .blur(radius: 12)
 
             groupLabel(group: group, position: CGPoint(
                 x: center.x,
                 y: center.y - h / 2 + 15
             ))
         }
+        .drawingGroup()
         .position(center)
         .allowsHitTesting(true)
         .onTapGesture(count: 2) {
@@ -827,7 +842,7 @@ struct CanvasWorkspaceView: View {
                     // Curved energy line
                     let midX = (fromPt.x + toPt.x) / 2
                     let midY = (fromPt.y + toPt.y) / 2
-                    let offset = sin(energyPhase * 0.03 + Double(i)) * 15
+                    let offset = sin(energyModel.phase * 0.03 + Double(i)) * 15
 
                     var path = Path()
                     path.move(to: fromPt)
@@ -850,7 +865,7 @@ struct CanvasWorkspaceView: View {
                     )
 
                     // Energy particle along the path
-                    let t = (sin(energyPhase * 0.04 + Double(i)) + 1) / 2
+                    let t = (sin(energyModel.phase * 0.04 + Double(i)) + 1) / 2
                     let px = fromPt.x + (toPt.x - fromPt.x) * t
                     let py = fromPt.y + (toPt.y - fromPt.y) * t + CGFloat(offset) * (1 - abs(2 * t - 1))
                     let particleRect = CGRect(x: px - 3, y: py - 3, width: 6, height: 6)
@@ -1791,8 +1806,13 @@ struct CanvasWorkspaceView: View {
 
     private func startEnergyAnimation() {
         energyTimer?.invalidate()
-        energyTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 15.0, repeats: true) { _ in
-            energyPhase += 1
+        guard !groups.isEmpty else {
+            energyTimer = nil
+            return
+        }
+        // 5 FPS is sufficient for gentle group visual effects
+        energyTimer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { _ in
+            energyModel.phase += 1
         }
     }
 }

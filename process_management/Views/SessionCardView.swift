@@ -42,7 +42,7 @@ struct SessionCardView: View {
                         Text(session.projectName)
                             .font(.system(size: 14, weight: .bold))
                             .foregroundStyle(.white)
-                            .lineLimit(1)
+                            .fixedSize(horizontal: false, vertical: true)
 
                         HStack(spacing: 4) {
                             Image(systemName: hostIcon)
@@ -262,10 +262,22 @@ struct SessionCardView: View {
         withTransaction(t) {
             orbitAngle = 0
             pulseScale = 1.0
-            glowOpacity = 0.3
+            glowOpacity = activity == .idle ? 0.15 : 0.3
             particleY = 0
             tiltX = 0
             tiltY = 0
+        }
+
+        // Idle: use fixed values, no repeatForever animations (saves CPU)
+        guard activity != .idle else {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                // Only a gentle tilt, no orbit/pulse/particle
+                withAnimation(.easeInOut(duration: 4).repeatForever(autoreverses: true)) {
+                    tiltX = Double.random(in: -2...2)
+                    tiltY = Double.random(in: -1...1)
+                }
+            }
+            return
         }
 
         let speed: Double = {
@@ -285,8 +297,8 @@ struct SessionCardView: View {
             }
 
             withAnimation(.easeInOut(duration: speed * 0.6).repeatForever(autoreverses: true)) {
-                pulseScale = activity == .idle ? 1.0 : 1.5
-                glowOpacity = activity == .idle ? 0.15 : 0.6
+                pulseScale = 1.5
+                glowOpacity = 0.6
             }
 
             if activity == .thinking || activity == .toolRunning {

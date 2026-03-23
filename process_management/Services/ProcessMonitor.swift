@@ -16,6 +16,11 @@ final class ProcessMonitor: ObservableObject {
     private var cachedModDates: [Int32: Date] = [:]
     private var cachedActivities: [Int32: ClaudeActivity] = [:]
 
+    /// PID → HostApp cache (hostApp doesn't change for a living process)
+    private var hostAppCache: [Int32: HostApp] = [:]
+    /// PID → cwd cache (cwd doesn't change for a living process)
+    private var cwdCache: [Int32: String] = [:]
+
     func start() {
         refresh()
         timer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
@@ -32,10 +37,35 @@ final class ProcessMonitor: ObservableObject {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
             let pids = self.findClaudePIDs()
+
+            // Clean up caches for dead PIDs
+            let alivePIDs = Set(pids)
+            self.hostAppCache = self.hostAppCache.filter { alivePIDs.contains($0.key) }
+            self.cwdCache = self.cwdCache.filter { alivePIDs.contains($0.key) }
+
+            // Build process tree lookup table once: pid → (ppid, comm)
+            let processTree = self.buildProcessTree()
+
+            // Batch ps info for all claude PIDs in one call
+            let psInfoMap = self.batchPSInfo(pids: pids)
+
+            // Batch lsof for PIDs that don't have cached cwd
+            let uncachedPIDs = pids.filter { self.cwdCache[$0] == nil }
+            if !uncachedPIDs.isEmpty {
+                let cwdMap = self.batchCWD(pids: uncachedPIDs)
+                for (pid, cwd) in cwdMap {
+                    self.cwdCache[pid] = cwd
+                }
+            }
+
             var newSessions: [ClaudeSession] = []
 
             for pid in pids {
-                if let session = self.buildSession(pid: pid) {
+                if let session = self.buildSession(
+                    pid: pid,
+                    psInfo: psInfoMap[pid],
+                    processTree: processTree
+                ) {
                     newSessions.append(session)
                 }
             }
@@ -89,8 +119,13 @@ final class ProcessMonitor: ObservableObject {
                     }
                 }
 
-                self.sessions = newSessions
-                self.vscodeWindows = newVSCodeWindows
+                // Fix 3: Only update @Published if sessions actually changed
+                if newSessions != self.sessions {
+                    self.sessions = newSessions
+                }
+                if newVSCodeWindows != self.vscodeWindows {
+                    self.vscodeWindows = newVSCodeWindows
+                }
             }
         }
     }
@@ -100,25 +135,90 @@ final class ProcessMonitor: ObservableObject {
         return output.split(separator: "\n").compactMap { Int32($0.trimmingCharacters(in: .whitespaces)) }
     }
 
-    private func buildSession(pid: Int32) -> ClaudeSession? {
-        // Get process info via ps
-        let psOutput = shell("ps -o pid=,pcpu=,rss=,etime= -p \(pid)")
-        let parts = psOutput.trimmingCharacters(in: .whitespacesAndNewlines)
-            .split(separator: " ", omittingEmptySubsequences: true)
-        guard parts.count >= 4 else { return nil }
+    /// Build a full process tree in one shell call: pid → (ppid, comm)
+    private func buildProcessTree() -> [Int32: (ppid: Int32, comm: String)] {
+        let output = shell("ps -eo pid=,ppid=,comm=")
+        var tree: [Int32: (ppid: Int32, comm: String)] = [:]
+        for line in output.split(separator: "\n") {
+            let parts = line.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: true)
+            guard parts.count >= 3,
+                  let pid = Int32(parts[0].trimmingCharacters(in: .whitespaces)),
+                  let ppid = Int32(parts[1].trimmingCharacters(in: .whitespaces)) else { continue }
+            let comm = String(parts[2]).trimmingCharacters(in: .whitespaces)
+            tree[pid] = (ppid: ppid, comm: comm)
+        }
+        return tree
+    }
 
-        let cpuPercent = Double(parts[1]) ?? 0.0
-        let rssMB = (Double(parts[2]) ?? 0.0) / 1024.0
-        let elapsed = String(parts[3])
+    /// Batch get ps info (cpu, rss, etime) for multiple PIDs in one call
+    private struct PSInfo {
+        let cpuPercent: Double
+        let rssMB: Double
+        let elapsed: String
+    }
 
-        // Get cwd via lsof
-        let lsofOutput = shell("lsof -p \(pid) 2>/dev/null | awk '$4==\"cwd\"{print $NF}'")
-        let cwd = lsofOutput.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !cwd.isEmpty else { return nil }
+    private func batchPSInfo(pids: [Int32]) -> [Int32: PSInfo] {
+        guard !pids.isEmpty else { return [:] }
+        let pidList = pids.map { String($0) }.joined(separator: ",")
+        let output = shell("ps -o pid=,pcpu=,rss=,etime= -p \(pidList)")
+        var result: [Int32: PSInfo] = [:]
+        for line in output.split(separator: "\n") {
+            let parts = line.split(separator: " ", omittingEmptySubsequences: true)
+            guard parts.count >= 4,
+                  let pid = Int32(parts[0].trimmingCharacters(in: .whitespaces)) else { continue }
+            let cpu = Double(parts[1]) ?? 0.0
+            let rss = (Double(parts[2]) ?? 0.0) / 1024.0
+            let etime = String(parts[3])
+            result[pid] = PSInfo(cpuPercent: cpu, rssMB: rss, elapsed: etime)
+        }
+        return result
+    }
+
+    /// Batch get cwd for multiple PIDs in one lsof call
+    private func batchCWD(pids: [Int32]) -> [Int32: String] {
+        guard !pids.isEmpty else { return [:] }
+        let pidList = pids.map { String($0) }.joined(separator: ",")
+        let output = shell("lsof -a -d cwd -p \(pidList) 2>/dev/null")
+        var result: [Int32: String] = [:]
+        for line in output.split(separator: "\n") {
+            let parts = line.split(separator: " ", omittingEmptySubsequences: true)
+            // lsof output: COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME
+            guard parts.count >= 9 else { continue }
+            guard let pid = Int32(parts[1].trimmingCharacters(in: .whitespaces)) else { continue }
+            let fd = String(parts[3])
+            guard fd == "cwd" else { continue }
+            // NAME is the last field (may contain spaces, so join remaining)
+            let name = parts[8...].joined(separator: " ")
+            if !name.isEmpty {
+                result[pid] = name
+            }
+        }
+        return result
+    }
+
+    private func buildSession(
+        pid: Int32,
+        psInfo: PSInfo?,
+        processTree: [Int32: (ppid: Int32, comm: String)]
+    ) -> ClaudeSession? {
+        guard let info = psInfo else { return nil }
+
+        // Use cached cwd
+        guard let cwd = cwdCache[pid], !cwd.isEmpty else { return nil }
 
         let projectName = (cwd as NSString).lastPathComponent
-        let hostApp = detectHostApp(pid: pid)
-        let status = determineStatus(cpu: cpuPercent, elapsed: elapsed)
+
+        // Use cached hostApp or detect via process tree lookup
+        let hostApp: HostApp
+        if let cached = hostAppCache[pid] {
+            hostApp = cached
+        } else {
+            let detected = detectHostApp(pid: pid, processTree: processTree)
+            hostAppCache[pid] = detected
+            hostApp = detected
+        }
+
+        let status = determineStatus(cpu: info.cpuPercent, elapsed: info.elapsed)
         let jsonlPath = sessionResolver.resolveJSONLPath(cwd: cwd)
 
         // ファイル更新時刻が変わっていなければキャッシュを返す
@@ -132,7 +232,7 @@ final class ProcessMonitor: ObservableObject {
            cached == .idle {
             activity = cached
         } else {
-            activity = detectActivity(jsonlPath: jsonlPath, cpuPercent: cpuPercent)
+            activity = detectActivity(jsonlPath: jsonlPath, cpuPercent: info.cpuPercent)
             if let path = jsonlPath,
                let modDate = try? FileManager.default.attributesOfItem(atPath: path)[.modificationDate] as? Date {
                 cachedModDates[pid] = modDate
@@ -145,34 +245,34 @@ final class ProcessMonitor: ObservableObject {
             projectName: projectName,
             projectPath: cwd,
             hostApp: hostApp,
-            cpuPercent: cpuPercent,
-            memoryMB: rssMB,
-            elapsedTime: elapsed,
+            cpuPercent: info.cpuPercent,
+            memoryMB: info.rssMB,
+            elapsedTime: info.elapsed,
             status: status,
             jsonlPath: jsonlPath,
             activity: activity
         )
     }
 
-    private func detectHostApp(pid: Int32) -> HostApp {
+    /// Detect host app using pre-built process tree (no shell calls)
+    private func detectHostApp(pid: Int32, processTree: [Int32: (ppid: Int32, comm: String)]) -> HostApp {
         var current = pid
         for _ in 0..<6 {
-            let ppidStr = shell("ps -o ppid= -p \(current)").trimmingCharacters(in: .whitespacesAndNewlines)
-            guard let ppid = Int32(ppidStr), ppid > 1 else { break }
+            guard let entry = processTree[current], entry.ppid > 1 else { break }
+            let comm = entry.comm
 
-            let comm = shell("ps -o comm= -p \(ppid)").trimmingCharacters(in: .whitespacesAndNewlines)
+            // Check parent's comm
+            if let parentEntry = processTree[entry.ppid] {
+                let parentComm = parentEntry.comm
+                if parentComm.contains("Code") || parentComm.contains("Electron") {
+                    return .vscode
+                }
+                if parentComm.contains("Terminal") || parentComm.contains("iTerm") {
+                    return .terminal
+                }
+            }
 
-            if comm.contains("Code") || comm.contains("Electron") {
-                return .vscode
-            }
-            if comm.contains("nvim") || comm.contains("vim") {
-                return .nvim
-            }
-            if comm.contains("Terminal") || comm.contains("iTerm") {
-                return .terminal
-            }
-
-            current = ppid
+            current = entry.ppid
         }
         return .terminal
     }
@@ -352,8 +452,9 @@ final class ProcessMonitor: ObservableObject {
 
         do {
             try process.run()
-            process.waitUntilExit()
+            // Read pipe BEFORE waitUntilExit to avoid deadlock when output > 64KB
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
             return String(data: data, encoding: .utf8) ?? ""
         } catch {
             return ""

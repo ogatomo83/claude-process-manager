@@ -109,9 +109,7 @@ final class ConversationLoader: ObservableObject {
     }
 
     private func readNewContent() {
-        guard let path = currentPath,
-              let fh = FileHandle(forReadingAtPath: path) else { return }
-        defer { fh.closeFile() }
+        guard let fh = monitorFileHandle else { return }
 
         let fileSize = fh.seekToEndOfFile()
         guard fileSize > lastReadOffset else { return }

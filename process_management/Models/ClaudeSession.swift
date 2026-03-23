@@ -7,7 +7,7 @@ enum HostApp: String {
     case unknown = "Unknown"
 }
 
-enum SessionStatus {
+enum SessionStatus: Equatable {
     case active      // CPU使用中
     case idle        // 起動中だがCPU低い
     case stale       // 長時間放置(1時間以上アイドル)
@@ -29,7 +29,7 @@ enum SessionStatus {
     }
 }
 
-struct ClaudeSession: Identifiable {
+struct ClaudeSession: Identifiable, Equatable {
     let id: Int32 // PID
     let projectName: String
     let projectPath: String

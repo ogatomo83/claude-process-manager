@@ -69,7 +69,7 @@ struct VSCodeCardView: View {
                         Text(window.projectName)
                             .font(.system(size: 14, weight: .bold))
                             .foregroundStyle(.white)
-                            .lineLimit(1)
+                            .fixedSize(horizontal: false, vertical: true)
 
                         HStack(spacing: 4) {
                             Image(systemName: "chevron.left.forwardslash.chevron.right")
