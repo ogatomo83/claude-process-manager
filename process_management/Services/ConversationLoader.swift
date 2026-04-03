@@ -10,6 +10,10 @@ final class ConversationLoader: ObservableObject {
     private var currentPath: String?
     private var lastReadOffset: UInt64 = 0
 
+    deinit {
+        stop()
+    }
+
     private static let timestampFormatter: ISO8601DateFormatter = {
         let f = ISO8601DateFormatter()
         f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
@@ -112,6 +116,10 @@ final class ConversationLoader: ObservableObject {
         guard let fh = monitorFileHandle else { return }
 
         let fileSize = fh.seekToEndOfFile()
+        // Handle file rotation/truncation: reset offset if file shrank
+        if fileSize < lastReadOffset {
+            lastReadOffset = 0
+        }
         guard fileSize > lastReadOffset else { return }
 
         fh.seek(toFileOffset: lastReadOffset)
@@ -126,6 +134,10 @@ final class ConversationLoader: ObservableObject {
 
         for line in lines {
             let lineStr = String(line)
+
+            // Skip non-JSON lines and known heavy non-activity lines before parsing
+            guard lineStr.hasPrefix("{") else { continue }
+            if lineStr.contains("\"file-history-snapshot\"") { continue }
 
             // Detect activity from all lines (including progress)
             latestActivity = detectActivityFromLine(lineStr) ?? latestActivity

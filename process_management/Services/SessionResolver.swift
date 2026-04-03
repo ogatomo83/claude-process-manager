@@ -30,6 +30,12 @@ final class SessionResolver {
 
             for file in jsonlFiles {
                 let fullPath = "\(projectDir)/\(file)"
+                // Skip symlinks to prevent path traversal attacks
+                let fileURL = URL(fileURLWithPath: fullPath)
+                if let resourceValues = try? fileURL.resourceValues(forKeys: [.isSymbolicLinkKey]),
+                   resourceValues.isSymbolicLink == true {
+                    continue
+                }
                 let attrs = try fm.attributesOfItem(atPath: fullPath)
                 if let modDate = attrs[.modificationDate] as? Date, modDate > latestDate {
                     latestDate = modDate

@@ -140,6 +140,7 @@ struct CanvasWorkspaceView: View {
             }
         }
         .onChange(of: monitor.sessions.count) { _, _ in
+            cleanupStaleCardPositions()
             autoLayoutNewCards()
             if groupingMode != .custom {
                 applyAutoGrouping()
@@ -1604,6 +1605,17 @@ struct CanvasWorkspaceView: View {
         autoLayoutAllCards()
     }
 
+    // MARK: - Cleanup
+
+    /// Remove cardPositions and cardDragStart entries for dead PIDs
+    private func cleanupStaleCardPositions() {
+        let aliveIDs = Set(monitor.sessions.map { $0.id })
+        let vscodeIDs = monitor.detectVSCode ? Set(monitor.vscodeWindows.map { $0.id }) : Set<Int32>()
+        let validIDs = aliveIDs.union(vscodeIDs)
+        cardPositions = cardPositions.filter { validIDs.contains($0.key) }
+        cardDragStart = cardDragStart.filter { validIDs.contains($0.key) }
+    }
+
     // MARK: - Layout
 
     private var layoutCenter: CGPoint {
@@ -1743,12 +1755,11 @@ struct CanvasWorkspaceView: View {
     private func evaluateGroupRules() {
         for i in groups.indices {
             guard !groups[i].rules.isEmpty else { continue }
-            let matchingSessions = monitor.sessions.filter { session in
+            let matchingPIDs = Set(monitor.sessions.filter { session in
                 groups[i].rules.allSatisfy { $0.matches(session) }
-            }
-            for session in matchingSessions {
-                groups[i].memberPIDs.insert(session.id)
-            }
+            }.map { $0.id })
+            // Replace memberPIDs with current matches (removes stale members)
+            groups[i].memberPIDs = matchingPIDs
         }
     }
 
@@ -1770,10 +1781,19 @@ struct CanvasWorkspaceView: View {
     }
 
     private func groupBounds(positions: [CGPoint], padding: CGFloat) -> (center: CGPoint, size: CGSize) {
-        let minX = positions.map(\.x).min()! - padding
-        let maxX = positions.map(\.x).max()! + padding
-        let minY = positions.map(\.y).min()! - padding
-        let maxY = positions.map(\.y).max()! + padding
+        guard let first = positions.first else {
+            return (center: .zero, size: .zero)
+        }
+        var minX = first.x, maxX = first.x
+        var minY = first.y, maxY = first.y
+        for p in positions.dropFirst() {
+            if p.x < minX { minX = p.x }
+            if p.x > maxX { maxX = p.x }
+            if p.y < minY { minY = p.y }
+            if p.y > maxY { maxY = p.y }
+        }
+        minX -= padding; maxX += padding
+        minY -= padding; maxY += padding
         return (
             center: CGPoint(x: (minX + maxX) / 2, y: (minY + maxY) / 2),
             size: CGSize(width: maxX - minX, height: maxY - minY)

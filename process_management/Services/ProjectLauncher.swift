@@ -72,9 +72,18 @@ final class ProjectLauncher: ObservableObject {
         }
     }
 
+    /// Sanitize input for safe inclusion in AppleScript string literals.
+    /// Removes control characters (newlines, tabs) that break string context,
+    /// then escapes backslashes and double quotes.
+    private func sanitizeForAppleScript(_ input: String) -> String {
+        let cleaned = input.filter { !$0.isNewline && ($0.asciiValue.map { $0 >= 32 } ?? true) }
+        return cleaned
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+    }
+
     private func activateAndLaunchClaude(projectName: String, path: String) {
-        let escaped = projectName.replacingOccurrences(of: "\\", with: "\\\\")
-                                  .replacingOccurrences(of: "\"", with: "\\\"")
+        let escaped = sanitizeForAppleScript(projectName)
         let script = """
         tell application "System Events"
             set processNames to {"Electron", "Code", "Visual Studio Code"}

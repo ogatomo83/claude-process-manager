@@ -131,13 +131,13 @@ final class ProcessMonitor: ObservableObject {
     }
 
     private func findClaudePIDs() -> [Int32] {
-        let output = shell("pgrep -x claude")
+        let output = run(executable: "/usr/bin/pgrep", arguments: ["-x", "claude"])
         return output.split(separator: "\n").compactMap { Int32($0.trimmingCharacters(in: .whitespaces)) }
     }
 
-    /// Build a full process tree in one shell call: pid → (ppid, comm)
+    /// Build a full process tree in one call: pid → (ppid, comm)
     private func buildProcessTree() -> [Int32: (ppid: Int32, comm: String)] {
-        let output = shell("ps -eo pid=,ppid=,comm=")
+        let output = run(executable: "/bin/ps", arguments: ["-eo", "pid=,ppid=,comm="])
         var tree: [Int32: (ppid: Int32, comm: String)] = [:]
         for line in output.split(separator: "\n") {
             let parts = line.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: true)
@@ -160,7 +160,7 @@ final class ProcessMonitor: ObservableObject {
     private func batchPSInfo(pids: [Int32]) -> [Int32: PSInfo] {
         guard !pids.isEmpty else { return [:] }
         let pidList = pids.map { String($0) }.joined(separator: ",")
-        let output = shell("ps -o pid=,pcpu=,rss=,etime= -p \(pidList)")
+        let output = run(executable: "/bin/ps", arguments: ["-o", "pid=,pcpu=,rss=,etime=", "-p", pidList])
         var result: [Int32: PSInfo] = [:]
         for line in output.split(separator: "\n") {
             let parts = line.split(separator: " ", omittingEmptySubsequences: true)
@@ -178,7 +178,7 @@ final class ProcessMonitor: ObservableObject {
     private func batchCWD(pids: [Int32]) -> [Int32: String] {
         guard !pids.isEmpty else { return [:] }
         let pidList = pids.map { String($0) }.joined(separator: ",")
-        let output = shell("lsof -a -d cwd -p \(pidList) 2>/dev/null")
+        let output = run(executable: "/usr/sbin/lsof", arguments: ["-a", "-d", "cwd", "-p", pidList])
         var result: [Int32: String] = [:]
         for line in output.split(separator: "\n") {
             let parts = line.split(separator: " ", omittingEmptySubsequences: true)
@@ -223,9 +223,12 @@ final class ProcessMonitor: ObservableObject {
 
         // ファイル更新時刻が変わっていなければキャッシュを返す
         // ただし idle 以外はstale判定が必要なので再チェック
+        // Single FileManager call to avoid duplicate I/O
         let activity: ClaudeActivity
-        if let path = jsonlPath,
-           let modDate = try? FileManager.default.attributesOfItem(atPath: path)[.modificationDate] as? Date,
+        let modDate: Date? = jsonlPath.flatMap {
+            try? FileManager.default.attributesOfItem(atPath: $0)[.modificationDate] as? Date
+        }
+        if let modDate,
            let cachedMod = cachedModDates[pid],
            cachedMod == modDate,
            let cached = cachedActivities[pid],
@@ -233,8 +236,7 @@ final class ProcessMonitor: ObservableObject {
             activity = cached
         } else {
             activity = detectActivity(jsonlPath: jsonlPath, cpuPercent: info.cpuPercent)
-            if let path = jsonlPath,
-               let modDate = try? FileManager.default.attributesOfItem(atPath: path)[.modificationDate] as? Date {
+            if let modDate {
                 cachedModDates[pid] = modDate
             }
             cachedActivities[pid] = activity
@@ -441,23 +443,35 @@ final class ProcessMonitor: ObservableObject {
         return titles
     }
 
-    private func shell(_ command: String) -> String {
+    /// Run a command with arguments directly (no shell interpretation).
+    /// Includes a timeout to prevent hangs from stalled processes.
+    private func run(executable: String, arguments: [String], timeout: TimeInterval = 5.0) -> String {
         let process = Process()
         let pipe = Pipe()
-        process.executableURL = URL(fileURLWithPath: "/bin/sh")
-        process.arguments = ["-c", command]
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = arguments
         process.currentDirectoryURL = URL(fileURLWithPath: NSHomeDirectory())
         process.standardOutput = pipe
         process.standardError = FileHandle.nullDevice
 
         do {
             try process.run()
-            // Read pipe BEFORE waitUntilExit to avoid deadlock when output > 64KB
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            process.waitUntilExit()
-            return String(data: data, encoding: .utf8) ?? ""
         } catch {
+            ActivityLogger.shared.logError("Process launch failed: \(executable) - \(error)")
             return ""
         }
+
+        // Schedule timeout to terminate hung processes
+        let timeoutItem = DispatchWorkItem { [weak process] in
+            if process?.isRunning == true { process?.terminate() }
+        }
+        DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: timeoutItem)
+
+        // Read pipe BEFORE waitUntilExit to avoid deadlock when output > 64KB
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        timeoutItem.cancel()
+
+        return String(data: data, encoding: .utf8) ?? ""
     }
 }

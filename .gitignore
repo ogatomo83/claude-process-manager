@@ -11,8 +11,10 @@ DerivedData/
 # Swift Package Manager
 .swiftpm/
 
-# Claude Code local settings
-.claude/
+# Claude Code local settings (keep agents/)
+.claude/*
+!.claude/agents/
 
-# Generated docs
-docs/
+# Generated docs (keep AUDIT_TODO.md)
+docs/*
+!docs/AUDIT_TODO.md

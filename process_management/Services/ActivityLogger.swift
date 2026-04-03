@@ -27,17 +27,35 @@ final class ActivityLogger {
 
     /// Log a state transition from ProcessMonitor (polling)
     func logPoll(pid: Int32, project: String, event: String, result: ClaudeActivity) {
-        write("[POLL] pid=\(pid) project=\(project) event=\(event) → \(result.rawValue)")
+        let safeProject = String(project.prefix(20)).filter { !$0.isNewline }
+        let safeEvent = String(event.prefix(100)).filter { !$0.isNewline }
+        write("[POLL] pid=\(pid) project=\(safeProject) event=\(safeEvent) → \(result.rawValue)")
     }
 
     /// Log a state transition from ConversationLoader (file watch, single line)
     func logStream(event: String, result: ClaudeActivity) {
-        write("[STREAM] event=\(event) → \(result.rawValue)")
+        let safeEvent = String(event.prefix(100)).filter { !$0.isNewline }
+        write("[STREAM] event=\(safeEvent) → \(result.rawValue)")
     }
 
     /// Log initial load detection
     func logInitial(event: String, result: ClaudeActivity) {
         write("[INIT] event=\(event) → \(result.rawValue)")
+    }
+
+    /// Log an error (always logged regardless of enabled flag)
+    func logError(_ message: String) {
+        let ts = formatter.string(from: Date())
+        let line = "\(ts) [ERROR] \(message)\n"
+        queue.async { [logURL] in
+            if let data = line.data(using: .utf8) {
+                if let fh = try? FileHandle(forWritingTo: logURL) {
+                    fh.seekToEndOfFile()
+                    fh.write(data)
+                    fh.closeFile()
+                }
+            }
+        }
     }
 
     /// Log the actual activity change published to UI

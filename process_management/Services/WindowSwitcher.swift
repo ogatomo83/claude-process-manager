@@ -91,7 +91,8 @@ final class WindowSwitcher {
     private func findHostApp(pid: Int32) -> NSRunningApplication? {
         var current = pid
         for _ in 0..<6 {
-            let ppidStr = shell("ps -o ppid= -p \(current)").trimmingCharacters(in: .whitespacesAndNewlines)
+            let ppidStr = run(executable: "/bin/ps", arguments: ["-o", "ppid=", "-p", String(current)])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
             guard let ppid = Int32(ppidStr), ppid > 1 else { break }
 
             if let app = NSRunningApplication(processIdentifier: ppid),
@@ -103,19 +104,21 @@ final class WindowSwitcher {
         return nil
     }
 
-    private func shell(_ command: String) -> String {
+    /// Run a command with arguments directly (no shell interpretation, no pipe deadlock)
+    private func run(executable: String, arguments: [String]) -> String {
         let process = Process()
         let pipe = Pipe()
-        process.executableURL = URL(fileURLWithPath: "/bin/sh")
-        process.arguments = ["-c", command]
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = arguments
         process.currentDirectoryURL = URL(fileURLWithPath: NSHomeDirectory())
         process.standardOutput = pipe
         process.standardError = FileHandle.nullDevice
 
         do {
             try process.run()
-            process.waitUntilExit()
+            // Read pipe BEFORE waitUntilExit to avoid deadlock when output > 64KB
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
             return String(data: data, encoding: .utf8) ?? ""
         } catch {
             return ""
