@@ -51,8 +51,6 @@ struct CanvasWorkspaceView: View {
     @StateObject private var energyModel = EnergyPhaseModel()
     @State private var energyTimer: Timer?
 
-    // Vimmer mode
-    @AppStorage("vimmerMode") private var vimmerMode: Bool = false
     @FocusState private var isCanvasFocused: Bool
 
     private var visibleSessions: [ClaudeSession] {
@@ -108,7 +106,6 @@ struct CanvasWorkspaceView: View {
         .focusable()
         .focused($isCanvasFocused)
         .onKeyPress { press in
-            guard vimmerMode else { return .ignored }
             if press.key == KeyEquivalent("j") {
                 selectNextSession()
                 return .handled
@@ -190,7 +187,7 @@ struct CanvasWorkspaceView: View {
         }
     }
 
-    // MARK: - Vimmer Mode Selection
+    // MARK: - Session Navigation
 
     private func selectNextSession() {
         let sessions = visibleSessions
@@ -1400,23 +1397,6 @@ struct CanvasWorkspaceView: View {
                     )
             }
             .buttonStyle(.plain)
-
-            // Vimmer mode toggle
-            Button {
-                vimmerMode.toggle()
-            } label: {
-                Image(systemName: vimmerMode ? "keyboard.fill" : "keyboard")
-                    .foregroundStyle(vimmerMode ? .green : .white.opacity(0.5))
-                    .padding(6)
-                    .background(
-                        RoundedRectangle(cornerRadius: 6)
-                            .fill(vimmerMode ? .green.opacity(0.12) : .clear)
-                    )
-            }
-            .buttonStyle(.plain)
-            .help("Vimmer Mode (j/k/Enter)")
-
-            Divider().frame(height: 16).overlay(Color.white.opacity(0.15))
 
             // Zoom controls
             HStack(spacing: 8) {

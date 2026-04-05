@@ -4,7 +4,6 @@ import AppKit
 @main
 struct process_managementApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
-    @AppStorage("vimmerMode") private var vimmerMode: Bool = false
 
     init() {
         NotificationService.shared.requestPermission()
@@ -15,8 +14,6 @@ struct process_managementApp: App {
             Button("Show / Hide    \u{2318}\u{21E7}Space") {
                 GlobalHotkeyService.shared.toggleWindow()
             }
-            Divider()
-            Toggle("Vimmer Mode", isOn: $vimmerMode)
             Divider()
             Button("Quit") {
                 NSApp.terminate(nil)
