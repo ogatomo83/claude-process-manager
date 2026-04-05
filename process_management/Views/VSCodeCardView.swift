@@ -3,7 +3,6 @@ import SwiftUI
 struct VSCodeCardView: View {
     let window: VSCodeWindow
     let isSelected: Bool
-    let isHovered: Bool
 
     @State private var appear: Bool = false
 
@@ -93,7 +92,7 @@ struct VSCodeCardView: View {
             radius: isSelected ? 20 : 10,
             y: isSelected ? 8 : 4
         )
-        .scaleEffect(isHovered ? 1.06 : (isSelected ? 1.03 : 1.0))
+        .scaleEffect(isSelected ? 1.03 : 1.0)
         .opacity(appear ? 1 : 0)
         .offset(y: appear ? 0 : 30)
         .onAppear {

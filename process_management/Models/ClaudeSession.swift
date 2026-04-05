@@ -1,10 +1,19 @@
 import Foundation
 
-enum HostApp: String {
+enum HostApp: String, CaseIterable {
     case vscode = "VSCode"
-    case nvim = "nvim"
+    case iterm2 = "iTerm2"
     case terminal = "Terminal"
     case unknown = "Unknown"
+
+    var icon: String {
+        switch self {
+        case .vscode: return "chevron.left.forwardslash.chevron.right"
+        case .iterm2: return "terminal.fill"
+        case .terminal: return "terminal"
+        case .unknown: return "questionmark.circle"
+        }
+    }
 }
 
 enum SessionStatus: Equatable {

@@ -8,8 +8,7 @@ struct SessionListView: View {
 
     private var groupedSessions: [(hostApp: HostApp, sessions: [ClaudeSession])] {
         let dict = Dictionary(grouping: sessions) { $0.hostApp }
-        // VSCode first, then nvim, then others
-        let order: [HostApp] = [.vscode, .nvim, .terminal, .unknown]
+        let order: [HostApp] = [.vscode, .iterm2, .terminal, .unknown]
         return order.compactMap { app in
             guard let group = dict[app], !group.isEmpty else { return nil }
             return (hostApp: app, sessions: group)
@@ -96,11 +95,6 @@ struct SessionListView: View {
     }
 
     private func hostAppIcon(_ app: HostApp) -> String {
-        switch app {
-        case .vscode: return "chevron.left.forwardslash.chevron.right"
-        case .nvim: return "terminal"
-        case .terminal: return "terminal"
-        case .unknown: return "questionmark.circle"
-        }
+        app.icon
     }
 }

@@ -3,7 +3,6 @@ import SwiftUI
 struct SessionCardView: View {
     let session: ClaudeSession
     let isSelected: Bool
-    let isHovered: Bool
 
     @State private var appear: Bool = false
     @State private var orbitAngle: Double = 0
@@ -20,7 +19,7 @@ struct SessionCardView: View {
     private var hostColor: Color {
         switch session.hostApp {
         case .vscode: return .blue
-        case .nvim: return .green
+        case .iterm2: return .cyan
         case .terminal: return .orange
         case .unknown: return .gray
         }
@@ -86,9 +85,9 @@ struct SessionCardView: View {
             radius: isSelected ? 24 : 10,
             y: isSelected ? 8 : 4
         )
-        .rotation3DEffect(.degrees(isHovered ? tiltY : 0), axis: (x: 1, y: 0, z: 0), perspective: 0.5)
-        .rotation3DEffect(.degrees(isHovered ? tiltX : 0), axis: (x: 0, y: 1, z: 0), perspective: 0.5)
-        .scaleEffect(isHovered ? 1.06 : (isSelected ? 1.03 : 1.0))
+        .rotation3DEffect(.degrees(isSelected ? tiltY : 0), axis: (x: 1, y: 0, z: 0), perspective: 0.5)
+        .rotation3DEffect(.degrees(isSelected ? tiltX : 0), axis: (x: 0, y: 1, z: 0), perspective: 0.5)
+        .scaleEffect(isSelected ? 1.03 : 1.0)
         .opacity(appear ? 1 : 0)
         .offset(y: appear ? 0 : 30)
         .onAppear {
@@ -219,12 +218,7 @@ struct SessionCardView: View {
     private var activityIcon: String { activity.icon }
 
     private var hostIcon: String {
-        switch session.hostApp {
-        case .vscode: return "chevron.left.forwardslash.chevron.right"
-        case .nvim: return "terminal"
-        case .terminal: return "terminal"
-        case .unknown: return "questionmark.circle"
-        }
+        session.hostApp.icon
     }
 
     private func resourceBar(icon: String, value: Double, max maxVal: Double, label: String, color: Color) -> some View {

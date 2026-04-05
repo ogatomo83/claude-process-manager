@@ -59,11 +59,6 @@ struct SessionRowView: View {
     }
 
     private var hostAppIcon: String {
-        switch session.hostApp {
-        case .vscode: return "chevron.left.forwardslash.chevron.right"
-        case .nvim: return "terminal"
-        case .terminal: return "terminal"
-        case .unknown: return "questionmark.circle"
-        }
+        session.hostApp.icon
     }
 }

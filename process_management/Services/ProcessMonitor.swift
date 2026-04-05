@@ -2,10 +2,31 @@ import Foundation
 import Combine
 import CoreGraphics
 
+enum ClusterKind: Hashable {
+    case hostApp(HostApp)
+    case vscodeWindows
+
+    var label: String {
+        switch self {
+        case .hostApp(let app): return app.rawValue
+        case .vscodeWindows: return "VSCode Windows"
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .hostApp(let app): return app.icon
+        case .vscodeWindows: return "macwindow.on.rectangle"
+        }
+    }
+}
+
 final class ProcessMonitor: ObservableObject {
     @Published var sessions: [ClaudeSession] = []
     @Published var vscodeWindows: [VSCodeWindow] = []
-    @Published var detectVSCode: Bool = false
+    /// Currently displayed cluster. nil = auto-select first discovered.
+    @Published var selectedCluster: ClusterKind? = nil
+    @Published var discoveredClusters: [ClusterKind] = []
 
     private var timer: Timer?
     private let sessionResolver = SessionResolver()
@@ -46,11 +67,66 @@ final class ProcessMonitor: ObservableObject {
             // Build process tree lookup table once: pid → (ppid, comm)
             let processTree = self.buildProcessTree()
 
-            // Batch ps info for all claude PIDs in one call
-            let psInfoMap = self.batchPSInfo(pids: pids)
+            // Detect hostApp for all PIDs (lightweight, uses cache)
+            for pid in pids where self.hostAppCache[pid] == nil {
+                self.hostAppCache[pid] = self.detectHostApp(pid: pid, processTree: processTree)
+            }
 
-            // Batch lsof for PIDs that don't have cached cwd
-            let uncachedPIDs = pids.filter { self.cwdCache[$0] == nil }
+            // Build discovered clusters (stable order: HostApp.allCases then vscodeWindows)
+            let discoveredHostSet = Set(pids.compactMap { self.hostAppCache[$0] })
+            var clusters: [ClusterKind] = HostApp.allCases
+                .filter { discoveredHostSet.contains($0) }
+                .map { .hostApp($0) }
+
+            // Always detect VSCode windows (lightweight CGWindowList)
+            let allTitles = self.getVSCodeWindowTitles()
+            // Ensure cwd is cached for all VSCode-hosted PIDs (needed for exclusion filter)
+            let vscodePIDs = pids.filter { self.hostAppCache[$0] == .vscode }
+            let uncachedVSCodePIDs = vscodePIDs.filter { self.cwdCache[$0] == nil }
+            if !uncachedVSCodePIDs.isEmpty {
+                let cwdMap = self.batchCWD(pids: uncachedVSCodePIDs)
+                for (pid, cwd) in cwdMap {
+                    self.cwdCache[pid] = cwd
+                }
+            }
+            let claudeVSCodeProjects = Set(
+                vscodePIDs.compactMap { pid -> String? in
+                    guard let cwd = self.cwdCache[pid] else { return nil }
+                    return (cwd as NSString).lastPathComponent
+                }
+            )
+            let vsWindowTitles = allTitles.filter { title in
+                !claudeVSCodeProjects.contains { title.contains($0) }
+            }
+
+            // Debug: dump detection results to /tmp/
+            let debugLines = [
+                "[\(Date())] allTitles(\(allTitles.count)): \(allTitles)",
+                "claudeVSCodeProjects: \(claudeVSCodeProjects)",
+                "vsWindowTitles(\(vsWindowTitles.count)): \(vsWindowTitles)"
+            ].joined(separator: "\n")
+            try? debugLines.write(toFile: "/tmp/pm_vscode_debug.log", atomically: true, encoding: .utf8)
+
+            if !vsWindowTitles.isEmpty {
+                clusters.append(.vscodeWindows)
+            }
+
+            // Resolve active cluster
+            let activeCluster = self.selectedCluster ?? clusters.first
+
+            // Filter PIDs to active hostApp cluster — skip heavy work for other clusters
+            let visiblePIDs: [Int32]
+            if case .hostApp(let app) = activeCluster {
+                visiblePIDs = pids.filter { self.hostAppCache[$0] == app }
+            } else {
+                visiblePIDs = []  // vscodeWindows cluster shows no Claude sessions
+            }
+
+            // Batch ps info for visible claude PIDs only
+            let psInfoMap = self.batchPSInfo(pids: visiblePIDs)
+
+            // Batch lsof for visible PIDs that don't have cached cwd
+            let uncachedPIDs = visiblePIDs.filter { self.cwdCache[$0] == nil }
             if !uncachedPIDs.isEmpty {
                 let cwdMap = self.batchCWD(pids: uncachedPIDs)
                 for (pid, cwd) in cwdMap {
@@ -60,7 +136,7 @@ final class ProcessMonitor: ObservableObject {
 
             var newSessions: [ClaudeSession] = []
 
-            for pid in pids {
+            for pid in visiblePIDs {
                 if let session = self.buildSession(
                     pid: pid,
                     psInfo: psInfoMap[pid],
@@ -70,23 +146,19 @@ final class ProcessMonitor: ObservableObject {
                 }
             }
 
-            // Detect VSCode windows without Claude
-            var newVSCodeWindows: [VSCodeWindow] = []
-            if self.detectVSCode {
-                let allTitles = self.getVSCodeWindowTitles()
-                let claudeProjects = Set(
-                    newSessions
-                        .filter { $0.hostApp == .vscode }
-                        .map { $0.projectName }
-                )
-                newVSCodeWindows = allTitles
-                    .filter { title in
-                        !claudeProjects.contains { projName in title.contains(projName) }
-                    }
-                    .map { VSCodeWindow(windowTitle: $0) }
-            }
+            // Always build VSCode window models so they're ready when cluster is switched
+            let newVSCodeWindows = vsWindowTitles.map { VSCodeWindow(windowTitle: $0) }
 
             DispatchQueue.main.async {
+                // Update discovered clusters
+                if clusters != self.discoveredClusters {
+                    self.discoveredClusters = clusters
+                }
+                // Auto-select first discovered if none selected or current vanished
+                if self.selectedCluster == nil || !clusters.contains(self.selectedCluster!) {
+                    self.selectedCluster = clusters.first
+                }
+
                 // Detect idle transitions and send notifications
                 for session in newSessions {
                     let previous = self.previousActivities[session.id]
@@ -259,24 +331,28 @@ final class ProcessMonitor: ObservableObject {
     /// Detect host app using pre-built process tree (no shell calls)
     private func detectHostApp(pid: Int32, processTree: [Int32: (ppid: Int32, comm: String)]) -> HostApp {
         var current = pid
-        for _ in 0..<6 {
+        for _ in 0..<10 {
             guard let entry = processTree[current], entry.ppid > 1 else { break }
-            let comm = entry.comm
 
-            // Check parent's comm
             if let parentEntry = processTree[entry.ppid] {
                 let parentComm = parentEntry.comm
-                if parentComm.contains("Code") || parentComm.contains("Electron") {
+                // VSCode: match "Visual Studio" to exclude other Electron apps (Slack, Discord)
+                if parentComm.contains("Visual Studio") || parentComm.contains("Code Helper") {
                     return .vscode
                 }
-                if parentComm.contains("Terminal") || parentComm.contains("iTerm") {
+                // iTerm2: "iTerm" matches both iTerm2.app and iTermServer
+                if parentComm.contains("iTerm") {
+                    return .iterm2
+                }
+                // macOS Terminal.app: full path to avoid false positives
+                if parentComm.contains("Terminal.app") || parentComm.hasSuffix("/Terminal") {
                     return .terminal
                 }
             }
 
             current = entry.ppid
         }
-        return .terminal
+        return .unknown
     }
 
     private func determineStatus(cpu: Double, elapsed: String) -> SessionStatus {
@@ -424,23 +500,21 @@ final class ProcessMonitor: ObservableObject {
     }
 
     private func getVSCodeWindowTitles() -> [String] {
-        // Use CGWindowListCopyWindowInfo instead of AppleScript
-        // Works across all Spaces including full-screen windows
-        guard let windowList = CGWindowListCopyWindowInfo(
-            [.optionAll, .excludeDesktopElements], kCGNullWindowID
-        ) as? [[String: Any]] else { return [] }
-
-        let vscodeOwners: Set<String> = ["Electron", "Code", "Visual Studio Code"]
-        var titles: [String] = []
-
-        for window in windowList {
-            guard let owner = window[kCGWindowOwnerName as String] as? String,
-                  vscodeOwners.contains(owner),
-                  let name = window[kCGWindowName as String] as? String,
-                  !name.isEmpty else { continue }
-            titles.append(name)
-        }
-        return titles
+        // AppleScript: get window names from "Code" process
+        let script = """
+        tell application "System Events"
+            if exists (process "Code") then
+                return name of every window of process "Code"
+            end if
+        end tell
+        return {}
+        """
+        let output = run(executable: "/usr/bin/osascript", arguments: ["-e", script])
+        let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return [] }
+        // AppleScript returns comma-separated list: "title1, title2, ..."
+        return trimmed.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
     }
 
     /// Run a command with arguments directly (no shell interpretation).

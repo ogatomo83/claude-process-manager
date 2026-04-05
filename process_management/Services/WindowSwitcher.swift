@@ -10,7 +10,7 @@ final class WindowSwitcher {
         switch session.hostApp {
         case .vscode:
             openWithVSCode(path: session.projectPath)
-        case .nvim, .terminal, .unknown:
+        case .iterm2, .terminal, .unknown:
             activateViaProcessTree(pid: session.pid, projectName: session.projectName)
         }
     }
