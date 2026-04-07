@@ -66,17 +66,10 @@ final class GlobalHotkeyService {
             let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
             let flags = event.flags
 
-            // ⌘⇧Space: keyCode 49, cmd + shift
-            let requiredFlags: CGEventFlags = [.maskCommand, .maskShift]
-            if keyCode == 49
-                && flags.contains(requiredFlags)
-                && !flags.contains(.maskControl)
-                && !flags.contains(.maskAlternate)
-            {
+            if KeyBindingStore.shared.matchesEventTap(.toggleWindow, keyCode: keyCode, flags: flags) {
                 DispatchQueue.main.async {
                     GlobalHotkeyService.shared.toggleWindow()
                 }
-                // Consume the event so it doesn't propagate
                 return nil
             }
 

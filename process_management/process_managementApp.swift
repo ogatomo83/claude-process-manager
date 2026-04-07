@@ -15,6 +15,11 @@ struct process_managementApp: App {
                 GlobalHotkeyService.shared.toggleWindow()
             }
             Divider()
+            Button("Settings...") {
+                AppDelegate.toggleSettings()
+            }
+            .keyboardShortcut(",")
+            Divider()
             Button("Quit") {
                 NSApp.terminate(nil)
             }
@@ -25,6 +30,29 @@ struct process_managementApp: App {
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var panel: NSPanel?
+    private static var settingsWindow: NSWindow?
+    private var settingsHotkeyMonitor: Any?
+
+    static func toggleSettings() {
+        if let existing = settingsWindow, existing.isVisible {
+            existing.orderOut(nil)
+            return
+        }
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 400, height: 400),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "Settings"
+        window.contentView = NSHostingView(rootView: SettingsView())
+        window.center()
+        window.isReleasedWhenClosed = false
+        window.level = .floating
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        settingsWindow = window
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Hide from Dock and Cmd+Tab
@@ -58,6 +86,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         GlobalHotkeyService.shared.start(window: panel)
 
+        // ⌘, to toggle settings from any window in the app
+        settingsHotkeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            if event.keyCode == 43, event.modifierFlags.contains(.command) {
+                AppDelegate.toggleSettings()
+                return nil
+            }
+            return event
+        }
+
         // Show on first launch
         panel.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
@@ -65,6 +102,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         GlobalHotkeyService.shared.stop()
+        if let monitor = settingsHotkeyMonitor {
+            NSEvent.removeMonitor(monitor)
+            settingsHotkeyMonitor = nil
+        }
     }
 
     // Hide instead of destroying when close button (X) is clicked

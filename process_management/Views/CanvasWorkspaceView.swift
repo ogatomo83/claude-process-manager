@@ -61,19 +61,20 @@ struct CanvasWorkspaceView: View {
         .focusable()
         .focused($isCanvasFocused)
         .onKeyPress { press in
-            if press.key == KeyEquivalent("j") {
+            let kb = KeyBindingStore.shared
+            if kb.matches(.nextSession, key: press.key, modifiers: press.modifiers) {
                 selectNextSession()
                 return .handled
-            } else if press.key == KeyEquivalent("k") {
+            } else if kb.matches(.prevSession, key: press.key, modifiers: press.modifiers) {
                 selectPrevSession()
                 return .handled
-            } else if press.key == .return {
+            } else if kb.matches(.activateSession, key: press.key, modifiers: press.modifiers) {
                 openSelectedSession()
                 return .handled
-            } else if press.key == KeyEquivalent("]"), press.modifiers.contains(.command) {
+            } else if kb.matches(.nextCluster, key: press.key, modifiers: press.modifiers) {
                 DispatchQueue.main.async { selectNextCluster() }
                 return .handled
-            } else if press.key == KeyEquivalent("["), press.modifiers.contains(.command) {
+            } else if kb.matches(.prevCluster, key: press.key, modifiers: press.modifiers) {
                 DispatchQueue.main.async { selectPrevCluster() }
                 return .handled
             }
