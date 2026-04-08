@@ -10,7 +10,13 @@ final class WindowSwitcher {
         switch session.hostApp {
         case .vscode:
             openWithVSCode(path: session.projectPath)
-        case .iterm2, .terminal, .unknown:
+        case .iterm2:
+            if let tty = session.tty {
+                activateITerm2Session(tty: tty)
+            } else {
+                activateViaProcessTree(pid: session.pid, projectName: session.projectName)
+            }
+        case .terminal, .unknown:
             activateViaProcessTree(pid: session.pid, projectName: session.projectName)
         }
     }
@@ -40,6 +46,42 @@ final class WindowSwitcher {
             process.standardOutput = FileHandle.nullDevice
             process.standardError = FileHandle.nullDevice
             try? process.run()
+        }
+    }
+
+    // MARK: - iTerm2 activation via TTY → AppleScript
+
+    /// Switch to the iTerm2 tab/pane whose TTY matches the given device path.
+    /// Walks all windows → tabs → sessions, matches `tty of session`,
+    /// then selects the tab + session and brings the window to front.
+    private func activateITerm2Session(tty: String) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            let script = """
+            tell application "iTerm2"
+                repeat with w in windows
+                    repeat with t in tabs of w
+                        repeat with s in sessions of t
+                            if tty of s is "\(tty)" then
+                                select t
+                                select s
+                                set index of w to 1
+                                activate
+                                return true
+                            end if
+                        end repeat
+                    end repeat
+                end repeat
+            end tell
+            return false
+            """
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+            process.arguments = ["-e", script]
+            process.currentDirectoryURL = URL(fileURLWithPath: NSHomeDirectory())
+            process.standardOutput = FileHandle.nullDevice
+            process.standardError = FileHandle.nullDevice
+            try? process.run()
+            process.waitUntilExit()
         }
     }
 

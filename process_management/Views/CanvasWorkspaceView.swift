@@ -330,6 +330,12 @@ struct CanvasWorkspaceView: View {
             // Cluster selector (radio-button: one active at a time)
             ForEach(monitor.discoveredClusters, id: \.self) { cluster in
                 let isActive = monitor.selectedCluster == cluster
+                let hasSession: Bool = {
+                    switch cluster {
+                    case .hostApp(let app): return monitor.activeHostApps.contains(app)
+                    case .vscodeWindows: return !monitor.vscodeWindows.isEmpty
+                    }
+                }()
                 Button {
                     withAnimation(.spring(response: 0.3)) {
                         monitor.selectedCluster = cluster
@@ -342,7 +348,7 @@ struct CanvasWorkspaceView: View {
                         Text(cluster.label)
                             .font(.system(size: 11))
                     }
-                    .foregroundStyle(isActive ? .cyan : .white.opacity(0.3))
+                    .foregroundStyle(isActive ? .cyan : hasSession ? .white.opacity(0.3) : .white.opacity(0.15))
                     .padding(.horizontal, 8)
                     .padding(.vertical, 4)
                     .background(

@@ -27,6 +27,8 @@ final class ProcessMonitor: ObservableObject {
     /// Currently displayed cluster. nil = auto-select first discovered.
     @Published var selectedCluster: ClusterKind? = nil
     @Published var discoveredClusters: [ClusterKind] = []
+    /// HostApps that currently have at least one Claude session
+    @Published var activeHostApps: Set<HostApp> = []
 
     private var timer: Timer?
     private let sessionResolver = SessionResolver()
@@ -41,6 +43,8 @@ final class ProcessMonitor: ObservableObject {
     private var hostAppCache: [Int32: HostApp] = [:]
     /// PID → cwd cache (cwd doesn't change for a living process)
     private var cwdCache: [Int32: String] = [:]
+    /// PID → TTY cache (TTY doesn't change for a living process)
+    private var ttyCache: [Int32: String] = [:]
 
     func start() {
         refresh()
@@ -63,6 +67,7 @@ final class ProcessMonitor: ObservableObject {
             let alivePIDs = Set(pids)
             self.hostAppCache = self.hostAppCache.filter { alivePIDs.contains($0.key) }
             self.cwdCache = self.cwdCache.filter { alivePIDs.contains($0.key) }
+            self.ttyCache = self.ttyCache.filter { alivePIDs.contains($0.key) }
 
             // Build process tree lookup table once: pid → (ppid, comm)
             let processTree = self.buildProcessTree()
@@ -73,9 +78,11 @@ final class ProcessMonitor: ObservableObject {
             }
 
             // Build discovered clusters (stable order: HostApp.allCases then vscodeWindows)
+            // VSCode and iTerm2 are always shown; others only when sessions exist
             let discoveredHostSet = Set(pids.compactMap { self.hostAppCache[$0] })
+            let alwaysShown: Set<HostApp> = [.vscode, .iterm2]
             var clusters: [ClusterKind] = HostApp.allCases
-                .filter { discoveredHostSet.contains($0) }
+                .filter { alwaysShown.contains($0) || discoveredHostSet.contains($0) }
                 .map { .hostApp($0) }
 
             // Always detect VSCode windows (lightweight CGWindowList)
@@ -134,6 +141,41 @@ final class ProcessMonitor: ObservableObject {
                 }
             }
 
+            // Resolve iTerm2 session TTY for tab switching.
+            // Claude inside nvim :terminal has a pseudo-TTY that isn't an iTerm2 session;
+            // we walk up the process tree and use the ancestor TTY closest to iTermServer.
+            let itermPIDsNeedingTTY = visiblePIDs.filter {
+                self.hostAppCache[$0] == .iterm2 && self.ttyCache[$0] == nil
+            }
+            if !itermPIDsNeedingTTY.isEmpty {
+                // Collect ancestor chains for each iTerm2 claude PID
+                var allAncestorPIDs = Set<Int32>()
+                var ancestorChains: [Int32: [Int32]] = [:]
+                for pid in itermPIDsNeedingTTY {
+                    var chain: [Int32] = []
+                    var current = pid
+                    for _ in 0..<15 {
+                        chain.append(current)
+                        guard let entry = processTree[current], entry.ppid > 1 else { break }
+                        current = entry.ppid
+                    }
+                    ancestorChains[pid] = chain
+                    allAncestorPIDs.formUnion(chain)
+                }
+                // One batch ps call for all ancestor TTYs
+                let ttyMap = self.batchTTY(pids: Array(allAncestorPIDs))
+                // For each claude PID, walk from iTerm side (reversed) to find the session TTY
+                for pid in itermPIDsNeedingTTY {
+                    guard let chain = ancestorChains[pid] else { continue }
+                    for ancestor in chain.reversed() {
+                        if let tty = ttyMap[ancestor] {
+                            self.ttyCache[pid] = tty
+                            break
+                        }
+                    }
+                }
+            }
+
             var newSessions: [ClaudeSession] = []
 
             for pid in visiblePIDs {
@@ -150,13 +192,22 @@ final class ProcessMonitor: ObservableObject {
             let newVSCodeWindows = vsWindowTitles.map { VSCodeWindow(windowTitle: $0) }
 
             DispatchQueue.main.async {
-                // Update discovered clusters
+                // Update discovered clusters and active host apps
                 if clusters != self.discoveredClusters {
                     self.discoveredClusters = clusters
                 }
-                // Auto-select first discovered if none selected or current vanished
+                if discoveredHostSet != self.activeHostApps {
+                    self.activeHostApps = discoveredHostSet
+                }
+                // Auto-select: use default cluster setting, fallback to first discovered
                 if self.selectedCluster == nil || !clusters.contains(self.selectedCluster!) {
-                    self.selectedCluster = clusters.first
+                    let defaultRaw = UserDefaults.standard.string(forKey: "com.processmanagement.defaultCluster") ?? ""
+                    if let defaultHost = HostApp(rawValue: defaultRaw),
+                       clusters.contains(.hostApp(defaultHost)) {
+                        self.selectedCluster = .hostApp(defaultHost)
+                    } else {
+                        self.selectedCluster = clusters.first
+                    }
                 }
 
                 // Detect idle transitions and send notifications
@@ -268,6 +319,24 @@ final class ProcessMonitor: ObservableObject {
         return result
     }
 
+    /// Batch get TTY for multiple PIDs in one ps call
+    private func batchTTY(pids: [Int32]) -> [Int32: String] {
+        guard !pids.isEmpty else { return [:] }
+        let pidList = pids.map { String($0) }.joined(separator: ",")
+        let output = run(executable: "/bin/ps", arguments: ["-o", "pid=,tty=", "-p", pidList])
+        var result: [Int32: String] = [:]
+        for line in output.split(separator: "\n") {
+            let parts = line.split(separator: " ", omittingEmptySubsequences: true)
+            guard parts.count >= 2,
+                  let pid = Int32(parts[0].trimmingCharacters(in: .whitespaces)) else { continue }
+            let tty = String(parts[1]).trimmingCharacters(in: .whitespaces)
+            guard tty != "??" && !tty.isEmpty else { continue }
+            // ps returns "ttysXXX" → convert to "/dev/ttysXXX"
+            result[pid] = "/dev/\(tty)"
+        }
+        return result
+    }
+
     private func buildSession(
         pid: Int32,
         psInfo: PSInfo?,
@@ -324,7 +393,8 @@ final class ProcessMonitor: ObservableObject {
             elapsedTime: info.elapsed,
             status: status,
             jsonlPath: jsonlPath,
-            activity: activity
+            activity: activity,
+            tty: ttyCache[pid]
         )
     }
 

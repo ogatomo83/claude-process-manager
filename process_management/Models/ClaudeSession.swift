@@ -49,6 +49,7 @@ struct ClaudeSession: Identifiable, Equatable {
     let status: SessionStatus
     let jsonlPath: String?
     let activity: ClaudeActivity
+    let tty: String? // e.g. "/dev/ttys006" — used for iTerm2 tab switching
 
     var pid: Int32 { id }
 }

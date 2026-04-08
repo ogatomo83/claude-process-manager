@@ -5,10 +5,32 @@ struct SettingsView: View {
     @ObservedObject private var store = KeyBindingStore.shared
     @State private var recordingAction: ShortcutAction? = nil
     @State private var eventMonitor: Any? = nil
+    @AppStorage("com.processmanagement.defaultCluster") private var defaultCluster: String = "iTerm2"
 
     var body: some View {
         VStack(spacing: 0) {
-            // Header
+            // Default Cluster
+            HStack {
+                Image(systemName: "square.grid.2x2")
+                    .font(.system(size: 16))
+                    .foregroundStyle(.cyan)
+                Text("Default Cluster")
+                    .font(.system(size: 15, weight: .semibold))
+                Spacer()
+                Picker("", selection: $defaultCluster) {
+                    Text("iTerm2").tag("iTerm2")
+                    Text("VSCode").tag("VSCode")
+                }
+                .pickerStyle(.segmented)
+                .frame(width: 160)
+            }
+            .padding(.horizontal, 20)
+            .padding(.top, 20)
+            .padding(.bottom, 12)
+
+            Divider().overlay(Color.white.opacity(0.1))
+
+            // Keyboard Shortcuts Header
             HStack {
                 Image(systemName: "keyboard")
                     .font(.system(size: 16))
@@ -18,7 +40,7 @@ struct SettingsView: View {
                 Spacer()
             }
             .padding(.horizontal, 20)
-            .padding(.top, 20)
+            .padding(.top, 12)
             .padding(.bottom, 12)
 
             Divider().overlay(Color.white.opacity(0.1))
@@ -49,7 +71,7 @@ struct SettingsView: View {
             .padding(.horizontal, 20)
             .padding(.vertical, 12)
         }
-        .frame(width: 400, height: 400)
+        .frame(width: 400, height: 460)
         .background(Color(red: 0.1, green: 0.1, blue: 0.14))
         .onDisappear {
             stopRecording()
