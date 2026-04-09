@@ -184,6 +184,7 @@ enum ShortcutAction: String, CaseIterable {
     case activateSession
     case nextCluster
     case prevCluster
+    case commandPalette
 
     var label: String {
         switch self {
@@ -193,6 +194,7 @@ enum ShortcutAction: String, CaseIterable {
         case .activateSession: return "Activate Session"
         case .nextCluster: return "Next Cluster"
         case .prevCluster: return "Previous Cluster"
+        case .commandPalette: return "Command Palette"
         }
     }
 }
@@ -209,6 +211,7 @@ final class KeyBindingStore: ObservableObject {
         .activateSession: KeyBinding(key: "return", modifiers: []),
         .nextCluster:    KeyBinding(key: "]", modifiers: [.command]),
         .prevCluster:    KeyBinding(key: "[", modifiers: [.command]),
+        .commandPalette: KeyBinding(key: "/", modifiers: []),
     ]
 
     @Published var bindings: [ShortcutAction: KeyBinding] {

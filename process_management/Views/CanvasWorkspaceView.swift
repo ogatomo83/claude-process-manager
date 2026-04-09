@@ -13,7 +13,7 @@ struct CanvasWorkspaceView: View {
     @State private var baseScale: CGFloat = 1.0
     @State private var cardPositions: [Int32: CGPoint] = [:]
     @State private var selectedPID: Int32? = nil
-    @State private var showProjectList: Bool = false
+    @State private var showCommandPalette: Bool = false
 
     // Drag state (canvas pan)
     @State private var dragOffset: CGSize = .zero
@@ -39,15 +39,19 @@ struct CanvasWorkspaceView: View {
                 Spacer()
             }
 
-            // Project launcher overlay
-            if showProjectList {
+            // Command palette overlay
+            if showCommandPalette {
                 Color.black.opacity(0.3)
                     .ignoresSafeArea()
                     .onTapGesture {
-                        withAnimation(.spring(response: 0.3)) { showProjectList = false }
+                        withAnimation(.spring(response: 0.3)) { showCommandPalette = false }
                     }
-                ProjectListView(launcher: launcher, isVisible: $showProjectList)
-                    .transition(.scale(scale: 0.9).combined(with: .opacity))
+                VStack {
+                    CommandPaletteView(launcher: launcher, isVisible: $showCommandPalette)
+                        .padding(.top, 80)
+                    Spacer()
+                }
+                .transition(.opacity.combined(with: .move(edge: .top)))
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -62,6 +66,25 @@ struct CanvasWorkspaceView: View {
         .focused($isCanvasFocused)
         .onKeyPress { press in
             let kb = KeyBindingStore.shared
+
+            // Escape closes command palette
+            if showCommandPalette && press.key == .escape {
+                withAnimation(.spring(response: 0.3)) { showCommandPalette = false }
+                return .handled
+            }
+
+            // Command palette shortcut
+            if kb.matches(.commandPalette, key: press.key, modifiers: press.modifiers) {
+                launcher.scan(activeSessions: monitor.sessions)
+                withAnimation(.spring(response: 0.4, dampingFraction: 0.85)) {
+                    showCommandPalette.toggle()
+                }
+                return .handled
+            }
+
+            // Disable session navigation while command palette is open
+            guard !showCommandPalette else { return .ignored }
+
             if kb.matches(.nextSession, key: press.key, modifiers: press.modifiers) {
                 selectNextSession()
                 return .handled
@@ -399,17 +422,17 @@ struct CanvasWorkspaceView: View {
                 Image(systemName: "rectangle.3.group").foregroundStyle(.white.opacity(0.6))
             }.buttonStyle(.plain)
 
-            // Project launcher
+            // Command palette
             Button {
                 launcher.scan(activeSessions: monitor.sessions)
                 withAnimation(.spring(response: 0.4, dampingFraction: 0.85)) {
-                    showProjectList.toggle()
+                    showCommandPalette.toggle()
                 }
             } label: {
                 HStack(spacing: 4) {
-                    Image(systemName: "plus.circle.fill")
-                    Text("Launch")
-                        .font(.caption)
+                    Image(systemName: "terminal")
+                    Text("/")
+                        .font(.system(size: 12, weight: .bold, design: .monospaced))
                 }
                 .foregroundStyle(.cyan)
             }
