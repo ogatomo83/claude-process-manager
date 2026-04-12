@@ -9,20 +9,21 @@ struct SettingsView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // Default Cluster
+            // デフォルトクラスタ
             HStack {
                 Image(systemName: "square.grid.2x2")
                     .font(.system(size: 16))
                     .foregroundStyle(.cyan)
-                Text("Default Cluster")
+                Text("デフォルトクラスタ")
                     .font(.system(size: 15, weight: .semibold))
                 Spacer()
                 Picker("", selection: $defaultCluster) {
                     Text("iTerm2").tag("iTerm2")
                     Text("VSCode").tag("VSCode")
+                    Text("Neovim").tag("nvim")
                 }
                 .pickerStyle(.segmented)
-                .frame(width: 160)
+                .frame(width: 220)
             }
             .padding(.horizontal, 20)
             .padding(.top, 20)
@@ -30,12 +31,12 @@ struct SettingsView: View {
 
             Divider().overlay(Color.white.opacity(0.1))
 
-            // Keyboard Shortcuts Header
+            // キーボードショートカット ヘッダー
             HStack {
                 Image(systemName: "keyboard")
                     .font(.system(size: 16))
                     .foregroundStyle(.cyan)
-                Text("Keyboard Shortcuts")
+                Text("キーボードショートカット")
                     .font(.system(size: 15, weight: .semibold))
                 Spacer()
             }
@@ -57,9 +58,9 @@ struct SettingsView: View {
 
             Divider().overlay(Color.white.opacity(0.1))
 
-            // Footer
+            // フッター
             HStack {
-                Button("Reset to Defaults") {
+                Button("デフォルトに戻す") {
                     store.resetToDefaults()
                 }
                 .buttonStyle(.plain)
@@ -90,7 +91,7 @@ struct SettingsView: View {
             Spacer()
 
             if isRecording {
-                Text("Press a key...")
+                Text("キーを押してください...")
                     .font(.system(size: 12, weight: .medium, design: .monospaced))
                     .foregroundStyle(.cyan)
                     .padding(.horizontal, 10)
@@ -111,7 +112,7 @@ struct SettingsView: View {
                     )
             }
 
-            Button(isRecording ? "Cancel" : "Record") {
+            Button(isRecording ? "キャンセル" : "記録") {
                 if isRecording {
                     stopRecording()
                 } else {

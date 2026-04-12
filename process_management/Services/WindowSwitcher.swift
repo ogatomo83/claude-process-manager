@@ -21,6 +21,21 @@ final class WindowSwitcher {
         }
     }
 
+    /// Activate the host terminal tab/window for a Neovim session card.
+    /// iTerm2: switches by TTY (same as Claude path). Terminal.app: process-tree + AX.
+    func activate(nvim: NvimSession) {
+        switch nvim.hostApp {
+        case .iterm2:
+            if let tty = nvim.tty {
+                activateITerm2Session(tty: tty)
+            } else {
+                activateViaProcessTree(pid: nvim.pid, projectName: nvim.projectName)
+            }
+        case .terminal, .unknown, .vscode:
+            activateViaProcessTree(pid: nvim.pid, projectName: nvim.projectName)
+        }
+    }
+
     /// Activate VSCode window for a VSCodeWindow card (no Claude PID).
     func activateVSCodeWindow(projectName: String) {
         // Try to find the project path from the window title

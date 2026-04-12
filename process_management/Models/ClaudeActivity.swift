@@ -10,12 +10,12 @@ enum ClaudeActivity: String, Hashable, Codable {
 
     var label: String {
         switch self {
-        case .thinking: return "Thinking..."
-        case .toolRunning: return "Running tool..."
-        case .responding: return "Responding..."
-        case .waitingPermission: return "Awaiting approval..."
-        case .compacting: return "Compacting..."
-        case .idle: return "Waiting for input"
+        case .thinking: return "思考中..."
+        case .toolRunning: return "ツール実行中..."
+        case .responding: return "応答中..."
+        case .waitingPermission: return "承認待ち..."
+        case .compacting: return "コンパクト中..."
+        case .idle: return "入力待ち"
         }
     }
 

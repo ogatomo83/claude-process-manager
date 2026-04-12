@@ -41,6 +41,9 @@ struct SessionCardView: View {
                         Text(session.projectName)
                             .font(.system(size: 14, weight: .bold))
                             .foregroundStyle(.white)
+                            .lineLimit(2)
+                            .minimumScaleFactor(0.6)
+                            .truncationMode(.middle)
                             .fixedSize(horizontal: false, vertical: true)
 
                         HStack(spacing: 4) {
@@ -51,12 +54,8 @@ struct SessionCardView: View {
                         }
                         .foregroundStyle(.white.opacity(0.4))
                     }
-
-                    Spacer()
-
-                    Text(session.elapsedTime)
-                        .font(.system(size: 9, design: .monospaced))
-                        .foregroundStyle(.white.opacity(0.3))
+                    .layoutPriority(1)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
 
                 // Resource bars
@@ -113,6 +112,10 @@ struct SessionCardView: View {
                 .foregroundStyle(activityColor)
 
             Spacer()
+
+            Text(session.elapsedTime)
+                .font(.system(size: 9, design: .monospaced))
+                .foregroundStyle(.white.opacity(0.45))
 
             // Activity-specific icon
             Image(systemName: activityIcon)

@@ -19,8 +19,8 @@ final class NotificationService: NSObject, UNUserNotificationCenterDelegate {
 
     func notifyTurnCompleted(sessionName: String) {
         let content = UNMutableNotificationContent()
-        content.title = "Turn Completed"
-        content.body = "\(sessionName) is now idle"
+        content.title = "ターン完了"
+        content.body = "\(sessionName) がアイドル状態になりました"
         content.sound = .default
 
         let request = UNNotificationRequest(

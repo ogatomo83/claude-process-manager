@@ -10,17 +10,17 @@ struct process_managementApp: App {
     }
 
     var body: some Scene {
-        MenuBarExtra("Process Management", systemImage: "cpu") {
-            Button("Show / Hide    \u{2318}\u{21E7}Space") {
+        MenuBarExtra("プロセス管理", systemImage: "cpu") {
+            Button("表示 / 非表示    \u{2318}\u{21E7}Space") {
                 GlobalHotkeyService.shared.toggleWindow()
             }
             Divider()
-            Button("Settings...") {
+            Button("設定...") {
                 AppDelegate.toggleSettings()
             }
             .keyboardShortcut(",")
             Divider()
-            Button("Quit") {
+            Button("終了") {
                 NSApp.terminate(nil)
             }
             .keyboardShortcut("q")
@@ -44,7 +44,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             backing: .buffered,
             defer: false
         )
-        window.title = "Settings"
+        window.title = "設定"
         window.contentView = NSHostingView(rootView: SettingsView())
         window.center()
         window.isReleasedWhenClosed = false

@@ -5,11 +5,13 @@ import CoreGraphics
 enum ClusterKind: Hashable {
     case hostApp(HostApp)
     case vscodeWindows
+    case nvim
 
     var label: String {
         switch self {
         case .hostApp(let app): return app.rawValue
         case .vscodeWindows: return "VSCode Windows"
+        case .nvim: return "Neovim"
         }
     }
 
@@ -17,6 +19,7 @@ enum ClusterKind: Hashable {
         switch self {
         case .hostApp(let app): return app.icon
         case .vscodeWindows: return "macwindow.on.rectangle"
+        case .nvim: return "keyboard"
         }
     }
 }
@@ -24,6 +27,7 @@ enum ClusterKind: Hashable {
 final class ProcessMonitor: ObservableObject {
     @Published var sessions: [ClaudeSession] = []
     @Published var vscodeWindows: [VSCodeWindow] = []
+    @Published var nvimSessions: [NvimSession] = []
     /// Currently displayed cluster. nil = auto-select first discovered.
     @Published var selectedCluster: ClusterKind? = nil
     @Published var discoveredClusters: [ClusterKind] = []
@@ -62,19 +66,74 @@ final class ProcessMonitor: ObservableObject {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
             let pids = self.findClaudePIDs()
-
-            // Clean up caches for dead PIDs
-            let alivePIDs = Set(pids)
-            self.hostAppCache = self.hostAppCache.filter { alivePIDs.contains($0.key) }
-            self.cwdCache = self.cwdCache.filter { alivePIDs.contains($0.key) }
-            self.ttyCache = self.ttyCache.filter { alivePIDs.contains($0.key) }
+            let nvimPIDs = self.findNvimPIDs()
 
             // Build process tree lookup table once: pid → (ppid, comm)
             let processTree = self.buildProcessTree()
 
+            // Separate nvim into front (TTY-attached) and back (--embed) processes
+            let (frontNvimPIDs, backNvimPIDs) = self.separateNvimFrontBack(nvimPIDs)
+
+            // Clean up caches for dead PIDs (include nvim pids in alive set)
+            let alivePIDs = Set(pids)
+                .union(frontNvimPIDs)
+                .union(backNvimPIDs)
+            self.hostAppCache = self.hostAppCache.filter { alivePIDs.contains($0.key) }
+            self.cwdCache = self.cwdCache.filter { alivePIDs.contains($0.key) }
+            self.ttyCache = self.ttyCache.filter { alivePIDs.contains($0.key) }
+
             // Detect hostApp for all PIDs (lightweight, uses cache)
             for pid in pids where self.hostAppCache[pid] == nil {
                 self.hostAppCache[pid] = self.detectHostApp(pid: pid, processTree: processTree)
+            }
+            for pid in frontNvimPIDs where self.hostAppCache[pid] == nil {
+                self.hostAppCache[pid] = self.detectHostApp(pid: pid, processTree: processTree)
+            }
+            for pid in backNvimPIDs where self.hostAppCache[pid] == nil {
+                self.hostAppCache[pid] = self.detectHostApp(pid: pid, processTree: processTree)
+            }
+
+            // Filter front nvim PIDs to iTerm2/Terminal-hosted only
+            let filteredFrontNvimPIDs = frontNvimPIDs.filter {
+                let host = self.hostAppCache[$0]
+                return host == .iterm2 || host == .terminal
+            }
+            let frontSet = Set(filteredFrontNvimPIDs)
+
+            // Map each backend nvim to its front nvim (backend's parent chain contains front)
+            var backToFront: [Int32: Int32] = [:]
+            for back in backNvimPIDs {
+                var cur = back
+                for _ in 0..<5 {
+                    guard let entry = processTree[cur] else { break }
+                    if frontSet.contains(entry.ppid) {
+                        backToFront[back] = entry.ppid
+                        break
+                    }
+                    cur = entry.ppid
+                }
+            }
+
+            // Map each Claude inside nvim :terminal to its parent front nvim
+            var claudeParentNvim: [Int32: Int32] = [:]
+            var nvimToClaudes: [Int32: [Int32]] = [:]
+            for cpid in pids {
+                var cur = cpid
+                for _ in 0..<15 {
+                    guard let entry = processTree[cur], entry.ppid > 1 else { break }
+                    let p = entry.ppid
+                    if frontSet.contains(p) {
+                        claudeParentNvim[cpid] = p
+                        nvimToClaudes[p, default: []].append(cpid)
+                        break
+                    }
+                    if let front = backToFront[p] {
+                        claudeParentNvim[cpid] = front
+                        nvimToClaudes[front, default: []].append(cpid)
+                        break
+                    }
+                    cur = p
+                }
             }
 
             // Build discovered clusters (stable order: HostApp.allCases then vscodeWindows)
@@ -118,15 +177,24 @@ final class ProcessMonitor: ObservableObject {
                 clusters.append(.vscodeWindows)
             }
 
+            if !filteredFrontNvimPIDs.isEmpty {
+                clusters.append(.nvim)
+            }
+
             // Resolve active cluster
             let activeCluster = self.selectedCluster ?? clusters.first
 
             // Filter PIDs to active hostApp cluster — skip heavy work for other clusters
-            let visiblePIDs: [Int32]
+            var visiblePIDs: [Int32]
             if case .hostApp(let app) = activeCluster {
                 visiblePIDs = pids.filter { self.hostAppCache[$0] == app }
+                // Exclude Claude sessions that are nested inside nvim :terminal for iTerm2/Terminal
+                // to avoid duplication with the Neovim cluster.
+                if app == .iterm2 || app == .terminal {
+                    visiblePIDs = visiblePIDs.filter { claudeParentNvim[$0] == nil }
+                }
             } else {
-                visiblePIDs = []  // vscodeWindows cluster shows no Claude sessions
+                visiblePIDs = []  // vscodeWindows/nvim cluster shows no bare Claude sessions
             }
 
             // Batch ps info for visible claude PIDs only
@@ -191,6 +259,77 @@ final class ProcessMonitor: ObservableObject {
             // Always build VSCode window models so they're ready when cluster is switched
             let newVSCodeWindows = vsWindowTitles.map { VSCodeWindow(windowTitle: $0) }
 
+            // Build nvim sessions only when the nvim cluster is active (heavy work gating).
+            var newNvimSessions: [NvimSession] = []
+            let nvimClusterActive: Bool = {
+                if case .nvim = activeCluster { return true }
+                return false
+            }()
+            if nvimClusterActive && !filteredFrontNvimPIDs.isEmpty {
+                // Cache cwd for uncached front nvim PIDs
+                let uncachedNvimCwdPIDs = filteredFrontNvimPIDs.filter { self.cwdCache[$0] == nil }
+                if !uncachedNvimCwdPIDs.isEmpty {
+                    let cwdMap = self.batchCWD(pids: uncachedNvimCwdPIDs)
+                    for (pid, cwd) in cwdMap {
+                        self.cwdCache[pid] = cwd
+                    }
+                }
+
+                // Batch ps info for front + back nvim PIDs
+                let allNvimPIDs = filteredFrontNvimPIDs + backNvimPIDs
+                let nvimPSInfo = self.batchPSInfo(pids: allNvimPIDs)
+
+                // Resolve TTY for iTerm2 front nvim PIDs (reuse existing iTerm2 walking logic)
+                let itermNvimNeedingTTY = filteredFrontNvimPIDs.filter {
+                    self.hostAppCache[$0] == .iterm2 && self.ttyCache[$0] == nil
+                }
+                if !itermNvimNeedingTTY.isEmpty {
+                    // Front nvim has a real TTY directly — no ancestor walk needed
+                    let ttyMap = self.batchTTY(pids: itermNvimNeedingTTY)
+                    for (pid, tty) in ttyMap {
+                        self.ttyCache[pid] = tty
+                    }
+                }
+
+                // Build nested Claude sessions for each front nvim
+                // (these are excluded from visiblePIDs above, so build them individually here)
+                let nestedClaudePIDs = Array(Set(nvimToClaudes.values.flatMap { $0 }))
+                let nestedClaudePSInfo = self.batchPSInfo(pids: nestedClaudePIDs)
+                let uncachedNestedPIDs = nestedClaudePIDs.filter { self.cwdCache[$0] == nil }
+                if !uncachedNestedPIDs.isEmpty {
+                    let cwdMap = self.batchCWD(pids: uncachedNestedPIDs)
+                    for (pid, cwd) in cwdMap {
+                        self.cwdCache[pid] = cwd
+                    }
+                }
+                var builtNested: [Int32: ClaudeSession] = [:]
+                for cpid in nestedClaudePIDs {
+                    if let session = self.buildSession(
+                        pid: cpid,
+                        psInfo: nestedClaudePSInfo[cpid],
+                        processTree: processTree
+                    ) {
+                        builtNested[cpid] = session
+                    }
+                }
+
+                for front in filteredFrontNvimPIDs {
+                    // Find backend for this front (inverse map from backToFront)
+                    let back = backToFront.first(where: { $0.value == front })?.key
+                    let nestedClaudes: [ClaudeSession] = (nvimToClaudes[front] ?? [])
+                        .compactMap { builtNested[$0] }
+                    if let nvs = self.buildNvimSession(
+                        frontPid: front,
+                        backPid: back,
+                        psInfoFront: nvimPSInfo[front],
+                        psInfoBack: back.flatMap { nvimPSInfo[$0] },
+                        nestedClaudes: nestedClaudes
+                    ) {
+                        newNvimSessions.append(nvs)
+                    }
+                }
+            }
+
             DispatchQueue.main.async {
                 // Update discovered clusters and active host apps
                 if clusters != self.discoveredClusters {
@@ -202,9 +341,14 @@ final class ProcessMonitor: ObservableObject {
                 // Auto-select: use default cluster setting, fallback to first discovered
                 if self.selectedCluster == nil || !clusters.contains(self.selectedCluster!) {
                     let defaultRaw = UserDefaults.standard.string(forKey: "com.processmanagement.defaultCluster") ?? ""
-                    if let defaultHost = HostApp(rawValue: defaultRaw),
-                       clusters.contains(.hostApp(defaultHost)) {
-                        self.selectedCluster = .hostApp(defaultHost)
+                    let defaultCluster: ClusterKind? = {
+                        if defaultRaw == "nvim" { return .nvim }
+                        if defaultRaw == "vscodeWindows" { return .vscodeWindows }
+                        if let h = HostApp(rawValue: defaultRaw) { return .hostApp(h) }
+                        return nil
+                    }()
+                    if let dc = defaultCluster, clusters.contains(dc) {
+                        self.selectedCluster = dc
                     } else {
                         self.selectedCluster = clusters.first
                     }
@@ -249,6 +393,9 @@ final class ProcessMonitor: ObservableObject {
                 if newVSCodeWindows != self.vscodeWindows {
                     self.vscodeWindows = newVSCodeWindows
                 }
+                if newNvimSessions != self.nvimSessions {
+                    self.nvimSessions = newNvimSessions
+                }
             }
         }
     }
@@ -256,6 +403,69 @@ final class ProcessMonitor: ObservableObject {
     private func findClaudePIDs() -> [Int32] {
         let output = run(executable: "/usr/bin/pgrep", arguments: ["-x", "claude"])
         return output.split(separator: "\n").compactMap { Int32($0.trimmingCharacters(in: .whitespaces)) }
+    }
+
+    private func findNvimPIDs() -> [Int32] {
+        let output = run(executable: "/usr/bin/pgrep", arguments: ["-x", "nvim"])
+        return output.split(separator: "\n").compactMap { Int32($0.trimmingCharacters(in: .whitespaces)) }
+    }
+
+    /// Separate nvim PIDs into front (TTY-attached) and back (`--embed`) processes
+    /// in a single ps call. Backend nvim has tty="??" or args containing "--embed".
+    private func separateNvimFrontBack(_ nvimPIDs: [Int32]) -> (front: [Int32], back: [Int32]) {
+        guard !nvimPIDs.isEmpty else { return ([], []) }
+        let pidList = nvimPIDs.map(String.init).joined(separator: ",")
+        let output = run(executable: "/bin/ps",
+                         arguments: ["-o", "pid=,tty=,args=", "-p", pidList])
+        var front: [Int32] = []
+        var back: [Int32] = []
+        for line in output.split(separator: "\n") {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            let parts = trimmed.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: true)
+            guard parts.count >= 3, let pid = Int32(parts[0]) else { continue }
+            let tty = String(parts[1])
+            let args = String(parts[2])
+            let isBack = args.contains("--embed") || tty == "??" || tty.isEmpty
+            if isBack {
+                back.append(pid)
+            } else {
+                front.append(pid)
+                if self.ttyCache[pid] == nil {
+                    self.ttyCache[pid] = "/dev/\(tty)"
+                }
+            }
+        }
+        return (front, back)
+    }
+
+    private func buildNvimSession(
+        frontPid: Int32,
+        backPid: Int32?,
+        psInfoFront: PSInfo?,
+        psInfoBack: PSInfo?,
+        nestedClaudes: [ClaudeSession]
+    ) -> NvimSession? {
+        guard let front = psInfoFront else { return nil }
+        guard let cwd = cwdCache[frontPid], !cwd.isEmpty else { return nil }
+        guard let host = hostAppCache[frontPid],
+              host == .iterm2 || host == .terminal else { return nil }
+
+        let projectName = (cwd as NSString).lastPathComponent
+        let cpu = front.cpuPercent + (psInfoBack?.cpuPercent ?? 0)
+        let rss = front.rssMB + (psInfoBack?.rssMB ?? 0)
+
+        return NvimSession(
+            id: frontPid,
+            backendPid: backPid,
+            projectName: projectName,
+            projectPath: cwd,
+            hostApp: host,
+            cpuPercent: cpu,
+            memoryMB: rss,
+            elapsedTime: front.elapsed,
+            tty: ttyCache[frontPid],
+            claudeSessions: nestedClaudes
+        )
     }
 
     /// Build a full process tree in one call: pid → (ppid, comm)
@@ -376,7 +586,7 @@ final class ProcessMonitor: ObservableObject {
            cached == .idle {
             activity = cached
         } else {
-            activity = detectActivity(jsonlPath: jsonlPath, cpuPercent: info.cpuPercent)
+            activity = ActivityDetector.detect(jsonlPath: jsonlPath, enableLogging: true)
             if let modDate {
                 cachedModDates[pid] = modDate
             }
@@ -447,126 +657,6 @@ final class ProcessMonitor: ObservableObject {
             return true
         }
         return false
-    }
-
-    /// Lightweight activity detection: read last 64KB of JSONL.
-    /// Only `system::turn_duration` is treated as a definitive idle signal.
-    /// When turn_duration follows an assistant with tool_use, the session is
-    /// waiting for user approval, not idle.
-    private func detectActivity(jsonlPath: String?, cpuPercent: Double) -> ClaudeActivity {
-        guard let path = jsonlPath,
-              let fh = FileHandle(forReadingAtPath: path) else { return .idle }
-        defer { fh.closeFile() }
-
-        let fileSize = fh.seekToEndOfFile()
-        guard fileSize > 0 else { return .idle }
-
-        let fileURL = URL(fileURLWithPath: path)
-        let modDate = (try? FileManager.default.attributesOfItem(atPath: fileURL.path)[.modificationDate] as? Date) ?? Date.distantPast
-        let secondsSinceModified = Date().timeIntervalSince(modDate)
-
-        let chunkSize: UInt64 = min(fileSize, 65536)
-        fh.seek(toFileOffset: fileSize - chunkSize)
-        let data = fh.readDataToEndOfFile()
-        guard let content = String(data: data, encoding: .utf8) else { return .idle }
-
-        let lines = content.split(separator: "\n", omittingEmptySubsequences: true)
-        let project = (path as NSString).lastPathComponent.prefix(8)
-
-        // stale判定: ファイルが一定時間更新されていない場合の扱い
-        // - assistant(text) + stale → idle（ターン完了、turn_durationなし）
-        // - user(text) + stale → thinking（API応答待ち、時間がかかることがある）
-        // - progress/tool_use + stale → waitingPermission（ユーザー承認待ち）
-        // - assistant(thinking) + stale → thinking（思考に時間がかかる）
-        let isStaleForIdle = secondsSinceModified > 10
-
-        var sawTurnDuration = false
-
-        for line in lines.reversed() {
-            let s = String(line)
-
-            guard let jsonData = s.data(using: .utf8),
-                  let json = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] else { continue }
-
-            let type = json["type"] as? String ?? ""
-
-            switch type {
-            case "file-history-snapshot":
-                continue
-
-            case "progress":
-                // progressがある = ツールは承認済み・実行中
-                // サブエージェント等はprogressが断続的（10-15秒間隔）なのでstaleでもtoolRunning
-                ActivityLogger.shared.logPoll(pid: 0, project: String(project), event: "progress", result: .toolRunning)
-                return .toolRunning
-
-            case "system":
-                let subtype = json["subtype"] as? String ?? ""
-                if subtype == "turn_duration" {
-                    sawTurnDuration = true
-                    continue
-                }
-                if subtype == "compact_boundary" {
-                    let r: ClaudeActivity = secondsSinceModified > 30 ? .idle : .compacting
-                    ActivityLogger.shared.logPoll(pid: 0, project: String(project), event: "compact_boundary(\(Int(secondsSinceModified))s)", result: r)
-                    return r
-                }
-                continue
-
-            case "user":
-                if let message = json["message"] as? [String: Any],
-                   let contentArray = message["content"] as? [[String: Any]] {
-                    let isToolResult = contentArray.contains { ($0["type"] as? String) == "tool_result" }
-                    if isToolResult {
-                        // tool_result = ツール実行済み → Claudeが次のレスポンスを考え始める
-                        // API呼び出しに10秒以上かかることがあるのでstaleでもthinking
-                        let r: ClaudeActivity = sawTurnDuration ? .idle : .thinking
-                        ActivityLogger.shared.logPoll(pid: 0, project: String(project), event: "user(tool_result) sawTD=\(sawTurnDuration)", result: r)
-                        return r
-                    }
-                }
-                // user(text) + stale → まだthinking（APIは10秒以上かかることがある）
-                let r: ClaudeActivity = sawTurnDuration ? .idle : .thinking
-                ActivityLogger.shared.logPoll(pid: 0, project: String(project), event: "user(text) sawTD=\(sawTurnDuration)", result: r)
-                return r
-
-            case "assistant":
-                guard let msg = json["message"] as? [String: Any],
-                      let blocks = msg["content"] as? [[String: Any]] else {
-                    let r: ClaudeActivity = (sawTurnDuration || isStaleForIdle) ? .idle : .responding
-                    ActivityLogger.shared.logPoll(pid: 0, project: String(project), event: "assistant(no-content) sawTD=\(sawTurnDuration) stale=\(isStaleForIdle)", result: r)
-                    return r
-                }
-                let blockTypes = blocks.compactMap { $0["type"] as? String }
-                let blockDesc = blockTypes.joined(separator: ",")
-
-                // thinking only → thinking（staleでもthinking維持）
-                if blockTypes.contains("thinking") && !blockTypes.contains("text") && !blockTypes.contains("tool_use") {
-                    let r: ClaudeActivity = sawTurnDuration ? .idle : .thinking
-                    ActivityLogger.shared.logPoll(pid: 0, project: String(project), event: "assistant(\(blockDesc)) sawTD=\(sawTurnDuration)", result: r)
-                    return r
-                }
-                // tool_use → waitingPermission（承認待ち）
-                // tool_resultが後にあるケースはuser(tool_result)で先にthinkingを返すため到達しない
-                if blockTypes.contains("tool_use") {
-                    if sawTurnDuration {
-                        ActivityLogger.shared.logPoll(pid: 0, project: String(project), event: "assistant(tool_use) sawTD=true", result: .idle)
-                        return .idle
-                    }
-                    let toolName = blocks.first(where: { $0["type"] as? String == "tool_use" })?["name"] as? String ?? "?"
-                    ActivityLogger.shared.logPoll(pid: 0, project: String(project), event: "assistant(tool_use:\(toolName))", result: .waitingPermission)
-                    return .waitingPermission
-                }
-                // assistant(text) + stale → idle（ターン完了、turn_durationなし）
-                let r: ClaudeActivity = (sawTurnDuration || isStaleForIdle) ? .idle : .responding
-                ActivityLogger.shared.logPoll(pid: 0, project: String(project), event: "assistant(\(blockDesc)) sawTD=\(sawTurnDuration) stale=\(isStaleForIdle)", result: r)
-                return r
-
-            default:
-                continue
-            }
-        }
-        return .idle
     }
 
     private func getVSCodeWindowTitles() -> [String] {

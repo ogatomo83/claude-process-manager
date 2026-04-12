@@ -29,7 +29,11 @@ final class ConversationLoader: ObservableObject {
             guard let self else { return }
             let parsed = self.loadTail(path: jsonlPath, maxMessages: 50)
 
-            let detectedActivity = self.detectActivity(path: jsonlPath)
+            let detectedActivity = ActivityDetector.detect(
+                jsonlPath: jsonlPath,
+                chunkSize: 8192,
+                enableLogging: false
+            )
             ActivityLogger.shared.logInitial(event: "load(\(jsonlPath.suffix(12)))", result: detectedActivity)
 
             DispatchQueue.main.async {
@@ -252,90 +256,6 @@ final class ConversationLoader: ObservableObject {
     }
 
     // MARK: - Activity Detection
-
-    /// Read the last few lines of the JSONL to determine current activity.
-    /// Only `system::turn_duration` is treated as a definitive idle signal.
-    /// When turn_duration follows assistant with tool_use → waitingPermission.
-    private func detectActivity(path: String) -> ClaudeActivity {
-        guard let fh = FileHandle(forReadingAtPath: path) else { return .idle }
-        defer { fh.closeFile() }
-
-        let fileSize = fh.seekToEndOfFile()
-        guard fileSize > 0 else { return .idle }
-
-        let fileURL = URL(fileURLWithPath: path)
-        let modDate = (try? FileManager.default.attributesOfItem(atPath: fileURL.path)[.modificationDate] as? Date) ?? Date.distantPast
-        let secondsSinceModified = Date().timeIntervalSince(modDate)
-
-        let chunkSize: UInt64 = min(fileSize, 8192)
-        fh.seek(toFileOffset: fileSize - chunkSize)
-        let data = fh.readDataToEndOfFile()
-        guard let content = String(data: data, encoding: .utf8) else { return .idle }
-
-        let lines = content.split(separator: "\n", omittingEmptySubsequences: true)
-        let isStaleForIdle = secondsSinceModified > 10
-
-        var sawTurnDuration = false
-
-        for line in lines.reversed() {
-            let s = String(line)
-
-            guard let jsonData = s.data(using: .utf8),
-                  let json = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] else { continue }
-
-            let type = json["type"] as? String ?? ""
-
-            switch type {
-            case "file-history-snapshot":
-                continue
-
-            case "progress":
-                return .toolRunning
-
-            case "system":
-                let subtype = json["subtype"] as? String ?? ""
-                if subtype == "turn_duration" {
-                    sawTurnDuration = true
-                    continue
-                }
-                if subtype == "compact_boundary" {
-                    return secondsSinceModified > 30 ? .idle : .compacting
-                }
-                continue
-
-            case "user":
-                if let message = json["message"] as? [String: Any],
-                   let contentArray = message["content"] as? [[String: Any]] {
-                    let isToolResult = contentArray.contains { ($0["type"] as? String) == "tool_result" }
-                    if isToolResult {
-                        // tool_result = ツール実行済み → Claudeが次のレスポンスを考え始める
-                        return sawTurnDuration ? .idle : .thinking
-                    }
-                }
-                return sawTurnDuration ? .idle : .thinking
-
-            case "assistant":
-                guard let message = json["message"] as? [String: Any],
-                      let contentArray = message["content"] as? [[String: Any]] else {
-                    return (sawTurnDuration || isStaleForIdle) ? .idle : .responding
-                }
-                let blockTypes = contentArray.compactMap { $0["type"] as? String }
-
-                if blockTypes.contains("thinking") && !blockTypes.contains("text") && !blockTypes.contains("tool_use") {
-                    return sawTurnDuration ? .idle : .thinking
-                }
-                if blockTypes.contains("tool_use") {
-                    return sawTurnDuration ? .idle : .waitingPermission
-                }
-                // assistant(text) + stale → idle
-                return (sawTurnDuration || isStaleForIdle) ? .idle : .responding
-
-            default:
-                continue
-            }
-        }
-        return .idle
-    }
 
     /// Determine activity from a single JSONL line (used for streaming updates)
     private func detectActivityFromLine(_ line: String) -> ClaudeActivity? {

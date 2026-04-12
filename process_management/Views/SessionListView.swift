@@ -19,7 +19,7 @@ struct SessionListView: View {
         VStack(alignment: .leading, spacing: 0) {
             // Header
             HStack {
-                Text("Sessions")
+                Text("セッション")
                     .font(.headline)
                 Spacer()
                 Text("\(sessions.count)")

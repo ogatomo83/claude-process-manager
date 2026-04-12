@@ -4,7 +4,7 @@ enum HostApp: String, CaseIterable {
     case vscode = "VSCode"
     case iterm2 = "iTerm2"
     case terminal = "Terminal"
-    case unknown = "Unknown"
+    case unknown = "不明"
 
     var icon: String {
         switch self {

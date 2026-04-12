@@ -188,13 +188,13 @@ enum ShortcutAction: String, CaseIterable {
 
     var label: String {
         switch self {
-        case .toggleWindow: return "Toggle Window"
-        case .nextSession: return "Next Session"
-        case .prevSession: return "Previous Session"
-        case .activateSession: return "Activate Session"
-        case .nextCluster: return "Next Cluster"
-        case .prevCluster: return "Previous Cluster"
-        case .commandPalette: return "Command Palette"
+        case .toggleWindow: return "ウィンドウ表示切替"
+        case .nextSession: return "次のセッション"
+        case .prevSession: return "前のセッション"
+        case .activateSession: return "セッションをアクティブ化"
+        case .nextCluster: return "次のクラスタ"
+        case .prevCluster: return "前のクラスタ"
+        case .commandPalette: return "コマンドパレット"
         }
     }
 }

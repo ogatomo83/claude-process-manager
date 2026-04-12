@@ -25,7 +25,28 @@ struct CanvasWorkspaceView: View {
     @FocusState private var isCanvasFocused: Bool
 
     private var visibleSessions: [ClaudeSession] {
-        monitor.sessions  // Already filtered by selectedHostApp in ProcessMonitor
+        // Sort by projectName so j/k navigation follows a stable, intuitive order.
+        monitor.sessions.sorted { a, b in
+            let cmp = a.projectName.localizedCaseInsensitiveCompare(b.projectName)
+            if cmp != .orderedSame { return cmp == .orderedAscending }
+            return a.id < b.id
+        }
+    }
+
+    private var sortedVSCodeWindows: [VSCodeWindow] {
+        monitor.vscodeWindows.sorted { a, b in
+            let cmp = a.projectName.localizedCaseInsensitiveCompare(b.projectName)
+            if cmp != .orderedSame { return cmp == .orderedAscending }
+            return a.id < b.id
+        }
+    }
+
+    private var sortedNvimSessions: [NvimSession] {
+        monitor.nvimSessions.sorted { a, b in
+            let cmp = a.projectName.localizedCaseInsensitiveCompare(b.projectName)
+            if cmp != .orderedSame { return cmp == .orderedAscending }
+            return a.id < b.id
+        }
     }
 
     var body: some View {
@@ -125,6 +146,10 @@ struct CanvasWorkspaceView: View {
         .onChange(of: monitor.vscodeWindows.count) { _, _ in
             autoLayoutNewCards()
         }
+        .onChange(of: monitor.nvimSessions.count) { _, _ in
+            cleanupStaleCardPositions()
+            autoLayoutNewCards()
+        }
         .onChange(of: monitor.selectedCluster) { _, _ in
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
                 withAnimation(.spring(response: 0.5, dampingFraction: 0.7)) {
@@ -165,33 +190,33 @@ struct CanvasWorkspaceView: View {
     // MARK: - Session Navigation
 
     private func selectNextSession() {
-        let sessions = visibleSessions
-        guard !sessions.isEmpty else { return }
+        let ids = allCardIDs
+        guard !ids.isEmpty else { return }
         if let current = selectedPID,
-           let idx = sessions.firstIndex(where: { $0.id == current }) {
-            let next = (idx + 1) % sessions.count
+           let idx = ids.firstIndex(of: current) {
+            let next = (idx + 1) % ids.count
             withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-                selectedPID = sessions[next].id
+                selectedPID = ids[next]
             }
         } else {
             withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-                selectedPID = sessions.first?.id
+                selectedPID = ids.first
             }
         }
     }
 
     private func selectPrevSession() {
-        let sessions = visibleSessions
-        guard !sessions.isEmpty else { return }
+        let ids = allCardIDs
+        guard !ids.isEmpty else { return }
         if let current = selectedPID,
-           let idx = sessions.firstIndex(where: { $0.id == current }) {
-            let prev = (idx - 1 + sessions.count) % sessions.count
+           let idx = ids.firstIndex(of: current) {
+            let prev = (idx - 1 + ids.count) % ids.count
             withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-                selectedPID = sessions[prev].id
+                selectedPID = ids[prev]
             }
         } else {
             withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-                selectedPID = sessions.last?.id
+                selectedPID = ids.last
             }
         }
     }
@@ -210,10 +235,18 @@ struct CanvasWorkspaceView: View {
     private func selectPrevCluster() { switchCluster(offset: -1) }
 
     private func openSelectedSession() {
-        guard let pid = selectedPID,
-              let session = visibleSessions.first(where: { $0.id == pid }) else { return }
-        windowSwitcher.activate(session: session)
-        GlobalHotkeyService.shared.toggleWindow()
+        guard let pid = selectedPID else { return }
+        if isNvimCluster {
+            if let nvim = monitor.nvimSessions.first(where: { $0.id == pid }) {
+                windowSwitcher.activate(nvim: nvim)
+                GlobalHotkeyService.shared.hideWindow(restorePreviousApp: false)
+            }
+            return
+        }
+        if let session = visibleSessions.first(where: { $0.id == pid }) {
+            windowSwitcher.activate(session: session)
+            GlobalHotkeyService.shared.hideWindow(restorePreviousApp: false)
+        }
     }
 
     // MARK: - Background
@@ -257,18 +290,28 @@ struct CanvasWorkspaceView: View {
         monitor.selectedCluster == .vscodeWindows
     }
 
+    private var isNvimCluster: Bool {
+        monitor.selectedCluster == .nvim
+    }
+
     private var canvasContent: some View {
         ZStack {
             // Cluster label
             if let cluster = monitor.selectedCluster {
-                let count = isVSCodeWindowsCluster ? monitor.vscodeWindows.count : visibleSessions.count
+                let count: Int = {
+                    switch cluster {
+                    case .vscodeWindows: return monitor.vscodeWindows.count
+                    case .nvim: return monitor.nvimSessions.count
+                    default: return visibleSessions.count
+                    }
+                }()
                 if count > 0 {
                     clusterLabel(cluster: cluster, count: count)
                 }
             }
 
             // Session cards (hostApp clusters)
-            if !isVSCodeWindowsCluster {
+            if !isVSCodeWindowsCluster && !isNvimCluster {
                 ForEach(visibleSessions) { session in
                     cardView(session: session)
                 }
@@ -280,12 +323,20 @@ struct CanvasWorkspaceView: View {
                     vscodeCardView(window: window)
                 }
             }
+
+            // Neovim session cards (nvim cluster)
+            if isNvimCluster {
+                ForEach(monitor.nvimSessions) { nvim in
+                    nvimCardView(nvim: nvim)
+                }
+            }
         }
     }
 
     private func clusterLabel(cluster: ClusterKind, count: Int) -> some View {
         let center = layoutCenter
-        let labelY = center.y - clusterRadius(for: count) - 60
+        let metrics = gridMetrics(count: count)
+        let labelY = center.y - metrics.totalHeight / 2 - 40
         return HStack(spacing: 6) {
             Image(systemName: cluster.icon)
                 .font(.system(size: 11))
@@ -333,11 +384,24 @@ struct CanvasWorkspaceView: View {
         )
     }
 
+    private func nvimCardView(nvim: NvimSession) -> some View {
+        let pos = cardPositions[nvim.id] ?? CGPoint(x: 400, y: 300)
+        return NvimSessionCardView(
+            session: nvim,
+            isSelected: selectedPID == nvim.id
+        )
+        .scaleEffect(canvasScale)
+        .position(
+            x: pos.x * canvasScale + canvasOffset.width,
+            y: pos.y * canvasScale + canvasOffset.height
+        )
+    }
+
     // MARK: - Floating Toolbar
 
     private var floatingToolbar: some View {
         HStack(spacing: 12) {
-            Text("Claude Sessions")
+            Text("Claude セッション")
                 .font(.headline)
                 .foregroundStyle(.white)
 
@@ -345,8 +409,12 @@ struct CanvasWorkspaceView: View {
 
             HStack(spacing: 4) {
                 Circle().fill(.green).frame(width: 6, height: 6)
-                let count = isVSCodeWindowsCluster ? monitor.vscodeWindows.count : visibleSessions.count
-                Text("\(count) active")
+                let count: Int = {
+                    if isVSCodeWindowsCluster { return monitor.vscodeWindows.count }
+                    if isNvimCluster { return monitor.nvimSessions.count }
+                    return visibleSessions.count
+                }()
+                Text("\(count) 件アクティブ")
                     .font(.caption).foregroundStyle(.white.opacity(0.7))
             }
 
@@ -357,6 +425,7 @@ struct CanvasWorkspaceView: View {
                     switch cluster {
                     case .hostApp(let app): return monitor.activeHostApps.contains(app)
                     case .vscodeWindows: return !monitor.vscodeWindows.isEmpty
+                    case .nvim: return !monitor.nvimSessions.isEmpty
                     }
                 }()
                 Button {
@@ -477,7 +546,8 @@ struct CanvasWorkspaceView: View {
     private func cleanupStaleCardPositions() {
         let aliveIDs = Set(monitor.sessions.map { $0.id })
         let vscodeIDs = Set(monitor.vscodeWindows.map { $0.id })
-        let validIDs = aliveIDs.union(vscodeIDs)
+        let nvimIDs = Set(monitor.nvimSessions.map { $0.id })
+        let validIDs = aliveIDs.union(vscodeIDs).union(nvimIDs)
         cardPositions = cardPositions.filter { validIDs.contains($0.key) }
     }
 
@@ -500,30 +570,56 @@ struct CanvasWorkspaceView: View {
         }
     }
 
+    /// Cards in the order used by j/k navigation and auto-layout.
+    /// Sorted by projectName so the visual grid matches navigation order.
     private var allCardIDs: [Int32] {
         if isVSCodeWindowsCluster {
-            return monitor.vscodeWindows.map { $0.id }
+            return sortedVSCodeWindows.map { $0.id }
         }
-        return monitor.sessions.map { $0.id }
+        if isNvimCluster {
+            return sortedNvimSessions.map { $0.id }
+        }
+        return visibleSessions.map { $0.id }
     }
 
-    /// Circle radius so adjacent cards (width 240 + 40 margin) don't overlap.
-    private func clusterRadius(for count: Int) -> CGFloat {
-        guard count > 1 else { return 0 }
-        let cardSpan: CGFloat = 280
-        let circumference = cardSpan * CGFloat(count)
-        return max(circumference / (2 * .pi), 200)
+    /// Metrics describing the grid layout for a given card count.
+    private struct GridMetrics {
+        let cols: Int
+        let rows: Int
+        let slotW: CGFloat
+        let slotH: CGFloat
+        var totalWidth: CGFloat { slotW * CGFloat(cols) }
+        var totalHeight: CGFloat { slotH * CGFloat(rows) }
     }
 
+    private func gridMetrics(count: Int) -> GridMetrics {
+        let slotW: CGFloat = 280
+        let slotH: CGFloat = 200
+        let usableWidth = max(viewSize.width - 80, 800)
+        let maxCols = max(1, Int(usableWidth / slotW))
+        let safeCount = max(count, 1)
+        let cols = min(maxCols, safeCount)
+        let rows = (safeCount + cols - 1) / cols
+        return GridMetrics(cols: cols, rows: rows, slotW: slotW, slotH: slotH)
+    }
+
+    /// Grid layout: cards placed in reading order (left→right, top→bottom).
+    /// Order matches `allCardIDs` so j/k navigation feels natural.
     private func autoLayoutAllCards() {
-        let allIDs = allCardIDs.sorted()
+        let ids = allCardIDs
+        guard !ids.isEmpty else { return }
+
+        let metrics = gridMetrics(count: ids.count)
         let center = layoutCenter
-        let radius = clusterRadius(for: allIDs.count)
-        for (i, id) in allIDs.enumerated() {
-            let angle = Double(i) * (2 * .pi / max(Double(allIDs.count), 1)) - .pi / 2
+        let startX = center.x - metrics.totalWidth / 2 + metrics.slotW / 2
+        let startY = center.y - metrics.totalHeight / 2 + metrics.slotH / 2
+
+        for (i, id) in ids.enumerated() {
+            let row = i / metrics.cols
+            let col = i % metrics.cols
             cardPositions[id] = CGPoint(
-                x: center.x + radius * CGFloat(cos(angle)),
-                y: center.y + radius * CGFloat(sin(angle))
+                x: startX + CGFloat(col) * metrics.slotW,
+                y: startY + CGFloat(row) * metrics.slotH
             )
         }
     }

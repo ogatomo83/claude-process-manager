@@ -7,6 +7,9 @@ final class GlobalHotkeyService {
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
     private weak var managedWindow: NSWindow?
+    // Strong reference — weak was the bug: NSRunningApplication got released between show and hide.
+    private var previousApp: NSRunningApplication?
+    private var previousAppPID: pid_t?
 
     private init() {}
 
@@ -31,12 +34,61 @@ final class GlobalHotkeyService {
 
     func toggleWindow() {
         guard let window = managedWindow else { return }
-        if window.isVisible {
-            window.orderOut(nil)
+        // For accessory apps, window.isVisible is the reliable indicator.
+        if window.isVisible && NSApp.isActive {
+            hideWindow(restorePreviousApp: true)
         } else {
-            window.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
+            showWindow()
         }
+    }
+
+    /// Show the window and remember which app was frontmost so it can be restored on dismiss.
+    func showWindow() {
+        guard let window = managedWindow else { return }
+        // Only record previous app when transitioning from hidden → shown
+        if !window.isVisible || !NSApp.isActive {
+            if let front = NSWorkspace.shared.frontmostApplication,
+               front.processIdentifier != getpid() {
+                previousApp = front
+                previousAppPID = front.processIdentifier
+            }
+        }
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    /// Hide the window. Optionally restore focus to the app that was frontmost before we showed.
+    /// Pass `restorePreviousApp: false` when the caller is activating a different target app
+    /// (e.g. launching VSCode, switching to a terminal session).
+    func hideWindow(restorePreviousApp: Bool) {
+        guard let window = managedWindow else { return }
+
+        if restorePreviousApp {
+            // Resolve the target: prefer the stored reference, fall back to PID lookup in case
+            // the reference was released or the app restarted.
+            var target: NSRunningApplication? = previousApp
+            if target == nil || target?.isTerminated == true, let pid = previousAppPID {
+                target = NSRunningApplication(processIdentifier: pid)
+            }
+
+            if let target, !target.isTerminated {
+                // Activate the other app first — this yields our active status to it,
+                // then orderOut our window so macOS doesn't try to re-activate us.
+                target.activate()
+                DispatchQueue.main.async {
+                    window.orderOut(nil)
+                }
+            } else {
+                // No valid previous app — hide the app entirely; macOS will pick next in order.
+                window.orderOut(nil)
+                NSApp.hide(nil)
+            }
+        } else {
+            window.orderOut(nil)
+        }
+
+        previousApp = nil
+        previousAppPID = nil
     }
 
     // MARK: - Accessibility

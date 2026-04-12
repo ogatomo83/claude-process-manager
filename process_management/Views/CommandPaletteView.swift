@@ -80,14 +80,14 @@ struct CommandPaletteView: View {
             // Suggestions / status
             switch parsed {
             case .empty:
-                commandHint("open", description: "Open project in VSCode + Claude")
+                commandHint("open", description: "VSCode と Claude でプロジェクトを開く")
 
             case .unknown(let cmd):
                 HStack(spacing: 6) {
                     Image(systemName: "exclamationmark.triangle")
                         .font(.caption)
                         .foregroundStyle(.yellow)
-                    Text("Unknown command: \(cmd)")
+                    Text("不明なコマンド: \(cmd)")
                         .font(.system(size: 12, design: .monospaced))
                         .foregroundStyle(.white.opacity(0.5))
                 }
@@ -100,7 +100,7 @@ struct CommandPaletteView: View {
                         Image(systemName: "magnifyingglass")
                             .font(.caption)
                             .foregroundStyle(.white.opacity(0.3))
-                        Text("No matching projects")
+                        Text("一致するプロジェクトがありません")
                             .font(.system(size: 12, design: .monospaced))
                             .foregroundStyle(.white.opacity(0.4))
                     }
@@ -215,7 +215,7 @@ struct CommandPaletteView: View {
     private func launchAndHide(project: ProjectEntry) {
         launcher.launch(project: project)
         isVisible = false
-        GlobalHotkeyService.shared.toggleWindow()
+        GlobalHotkeyService.shared.hideWindow(restorePreviousApp: false)
     }
 
     private func tabComplete() {

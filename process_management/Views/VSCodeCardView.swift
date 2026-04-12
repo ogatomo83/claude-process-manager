@@ -8,13 +8,13 @@ struct VSCodeCardView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // "No Claude" banner
+            // "Claude なし" バナー
             HStack(spacing: 6) {
                 Circle()
                     .fill(Color.gray)
                     .frame(width: 6, height: 6)
 
-                Text("No Claude")
+                Text("Claude なし")
                     .font(.system(size: 10, weight: .semibold, design: .monospaced))
                     .foregroundStyle(.gray)
 
@@ -68,6 +68,9 @@ struct VSCodeCardView: View {
                         Text(window.projectName)
                             .font(.system(size: 14, weight: .bold))
                             .foregroundStyle(.white)
+                            .lineLimit(2)
+                            .minimumScaleFactor(0.6)
+                            .truncationMode(.middle)
                             .fixedSize(horizontal: false, vertical: true)
 
                         HStack(spacing: 4) {
@@ -78,8 +81,8 @@ struct VSCodeCardView: View {
                         }
                         .foregroundStyle(.white.opacity(0.4))
                     }
-
-                    Spacer()
+                    .layoutPriority(1)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
             .padding(12)

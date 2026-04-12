@@ -54,10 +54,10 @@
   - 修正: `ActivityLogger.logError()` 追加 + run() でエラーログ出力
   - 報告: テストエンジニア, セキュリティエンジニア, コード開発者
 
-- [ ] **アクティビティ検出ロジック重複の解消** (High)
-  - `ProcessMonitor.swift:308-422` と `ConversationLoader.swift:247-326`
+- [x] **アクティビティ検出ロジック重複の解消** (High)
+  - `ProcessMonitor.swift` と `ConversationLoader.swift`
   - ほぼ同一の `detectActivity()` ロジックが2箇所に存在
-  - 修正: 共通の `ActivityDetector` サービスに抽出
+  - 修正: `Services/ActivityDetector.swift` に抽出。`chunkSize` と `enableLogging` をパラメータ化。未使用の `cpuPercent` 引数を削除
   - 報告: コード開発者
 
 ## Phase 3 — 次スプリント（堅牢性）
