@@ -114,28 +114,6 @@ final class ProcessMonitor: ObservableObject {
                 }
             }
 
-            // Map each Claude inside nvim :terminal to its parent front nvim
-            var claudeParentNvim: [Int32: Int32] = [:]
-            var nvimToClaudes: [Int32: [Int32]] = [:]
-            for cpid in pids {
-                var cur = cpid
-                for _ in 0..<15 {
-                    guard let entry = processTree[cur], entry.ppid > 1 else { break }
-                    let p = entry.ppid
-                    if frontSet.contains(p) {
-                        claudeParentNvim[cpid] = p
-                        nvimToClaudes[p, default: []].append(cpid)
-                        break
-                    }
-                    if let front = backToFront[p] {
-                        claudeParentNvim[cpid] = front
-                        nvimToClaudes[front, default: []].append(cpid)
-                        break
-                    }
-                    cur = p
-                }
-            }
-
             // Build discovered clusters (stable order: HostApp.allCases then vscodeWindows)
             // VSCode and iTerm2 are always shown; others only when sessions exist
             let discoveredHostSet = Set(pids.compactMap { self.hostAppCache[$0] })
@@ -188,11 +166,6 @@ final class ProcessMonitor: ObservableObject {
             var visiblePIDs: [Int32]
             if case .hostApp(let app) = activeCluster {
                 visiblePIDs = pids.filter { self.hostAppCache[$0] == app }
-                // Exclude Claude sessions that are nested inside nvim :terminal for iTerm2/Terminal
-                // to avoid duplication with the Neovim cluster.
-                if app == .iterm2 || app == .terminal {
-                    visiblePIDs = visiblePIDs.filter { claudeParentNvim[$0] == nil }
-                }
             } else {
                 visiblePIDs = []  // vscodeWindows/nvim cluster shows no bare Claude sessions
             }
@@ -291,39 +264,14 @@ final class ProcessMonitor: ObservableObject {
                     }
                 }
 
-                // Build nested Claude sessions for each front nvim
-                // (these are excluded from visiblePIDs above, so build them individually here)
-                let nestedClaudePIDs = Array(Set(nvimToClaudes.values.flatMap { $0 }))
-                let nestedClaudePSInfo = self.batchPSInfo(pids: nestedClaudePIDs)
-                let uncachedNestedPIDs = nestedClaudePIDs.filter { self.cwdCache[$0] == nil }
-                if !uncachedNestedPIDs.isEmpty {
-                    let cwdMap = self.batchCWD(pids: uncachedNestedPIDs)
-                    for (pid, cwd) in cwdMap {
-                        self.cwdCache[pid] = cwd
-                    }
-                }
-                var builtNested: [Int32: ClaudeSession] = [:]
-                for cpid in nestedClaudePIDs {
-                    if let session = self.buildSession(
-                        pid: cpid,
-                        psInfo: nestedClaudePSInfo[cpid],
-                        processTree: processTree
-                    ) {
-                        builtNested[cpid] = session
-                    }
-                }
-
                 for front in filteredFrontNvimPIDs {
                     // Find backend for this front (inverse map from backToFront)
                     let back = backToFront.first(where: { $0.value == front })?.key
-                    let nestedClaudes: [ClaudeSession] = (nvimToClaudes[front] ?? [])
-                        .compactMap { builtNested[$0] }
                     if let nvs = self.buildNvimSession(
                         frontPid: front,
                         backPid: back,
                         psInfoFront: nvimPSInfo[front],
-                        psInfoBack: back.flatMap { nvimPSInfo[$0] },
-                        nestedClaudes: nestedClaudes
+                        psInfoBack: back.flatMap { nvimPSInfo[$0] }
                     ) {
                         newNvimSessions.append(nvs)
                     }
@@ -442,8 +390,7 @@ final class ProcessMonitor: ObservableObject {
         frontPid: Int32,
         backPid: Int32?,
         psInfoFront: PSInfo?,
-        psInfoBack: PSInfo?,
-        nestedClaudes: [ClaudeSession]
+        psInfoBack: PSInfo?
     ) -> NvimSession? {
         guard let front = psInfoFront else { return nil }
         guard let cwd = cwdCache[frontPid], !cwd.isEmpty else { return nil }
@@ -463,8 +410,7 @@ final class ProcessMonitor: ObservableObject {
             cpuPercent: cpu,
             memoryMB: rss,
             elapsedTime: front.elapsed,
-            tty: ttyCache[frontPid],
-            claudeSessions: nestedClaudes
+            tty: ttyCache[frontPid]
         )
     }
 

@@ -10,8 +10,6 @@ struct NvimSessionCardView: View {
 
     private var hostIcon: String { session.hostApp.icon }
 
-    private var claudeCount: Int { session.claudeSessions.count }
-
     var body: some View {
         VStack(spacing: 0) {
             // Banner
@@ -24,17 +22,6 @@ struct NvimSessionCardView: View {
                 Text("Neovim")
                     .font(.system(size: 10, weight: .semibold, design: .monospaced))
                     .foregroundStyle(accentColor)
-
-                if claudeCount > 0 {
-                    Text("Claude +\(claudeCount)")
-                        .font(.system(size: 9, weight: .semibold, design: .monospaced))
-                        .foregroundStyle(.white.opacity(0.75))
-                        .padding(.horizontal, 5)
-                        .padding(.vertical, 1)
-                        .background(
-                            Capsule().fill(accentColor.opacity(0.25))
-                        )
-                }
 
                 Spacer()
 
@@ -123,11 +110,6 @@ struct NvimSessionCardView: View {
                     )
                 }
 
-                // Nested Claude badges (only when there are sessions)
-                if !session.claudeSessions.isEmpty {
-                    Divider().overlay(Color.white.opacity(0.08))
-                    claudeBadgeRow
-                }
             }
             .padding(12)
         }
@@ -144,42 +126,6 @@ struct NvimSessionCardView: View {
         .offset(y: appear ? 0 : 30)
         .onAppear {
             withAnimation(.spring(response: 0.6, dampingFraction: 0.7)) { appear = true }
-        }
-    }
-
-    // MARK: - Nested Claude badges
-
-    private var claudeBadgeRow: some View {
-        HStack(spacing: 6) {
-            ForEach(session.claudeSessions) { claude in
-                HStack(spacing: 4) {
-                    Circle()
-                        .fill(claude.activity.color)
-                        .frame(width: 5, height: 5)
-                        .shadow(color: claude.activity.color, radius: 2)
-
-                    Image(systemName: claude.activity.icon)
-                        .font(.system(size: 8))
-                        .foregroundStyle(claude.activity.color.opacity(0.9))
-
-                    Text(claude.projectName)
-                        .font(.system(size: 9, design: .monospaced))
-                        .foregroundStyle(.white.opacity(0.75))
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.7)
-                        .truncationMode(.middle)
-                }
-                .padding(.horizontal, 6)
-                .padding(.vertical, 3)
-                .background(
-                    Capsule()
-                        .fill(claude.activity.color.opacity(0.12))
-                        .overlay(
-                            Capsule().stroke(claude.activity.color.opacity(0.25), lineWidth: 0.5)
-                        )
-                )
-            }
-            Spacer(minLength: 0)
         }
     }
 

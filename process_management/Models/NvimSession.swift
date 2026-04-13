@@ -10,7 +10,6 @@ struct NvimSession: Identifiable, Equatable {
     let memoryMB: Double                // front + back combined
     let elapsedTime: String             // front etime
     let tty: String?                    // front TTY (for iTerm2 tab switching)
-    let claudeSessions: [ClaudeSession] // nested Claude sessions (0+)
 
     var pid: Int32 { id }
 }
