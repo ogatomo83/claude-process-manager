@@ -63,9 +63,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             window.close()
         }
 
-        // Create floating panel
+        // Create floating panel (80% of screen)
+        let screenFrame = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1100, height: 700)
+        let panelRect = NSRect(
+            x: screenFrame.origin.x + screenFrame.width * 0.1,
+            y: screenFrame.origin.y + screenFrame.height * 0.1,
+            width: screenFrame.width * 0.8,
+            height: screenFrame.height * 0.8
+        )
         let panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 1100, height: 700),
+            contentRect: panelRect,
             styleMask: [.titled, .closable, .resizable, .fullSizeContentView, .nonactivatingPanel],
             backing: .buffered,
             defer: false
@@ -77,7 +84,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         panel.hidesOnDeactivate = false
         panel.isReleasedWhenClosed = false
         panel.delegate = self
-        panel.center()
 
         let hostingView = NSHostingView(rootView: ContentView())
         panel.contentView = hostingView
